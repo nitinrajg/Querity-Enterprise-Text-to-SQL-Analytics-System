@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Queryable — Ask your database anything</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css?v=3">
+</head>
+<body>
+
+<div class="scanline-overlay" aria-hidden="true"></div>
+
+<!-- App Header -->
+<header class="app-header">
+  <div class="brand">
+    <span class="brand-mark">▸_</span>
+    <span class="brand-name">Queryable</span>
+    <span class="brand-badge" id="dbStatusBadge">Live DB</span>
+  </div>
+  <div class="header-actions">
+    <button class="action-btn upload-btn" id="uploadToggle" aria-haspopup="dialog">
+      <span class="btn-icon">↑</span> Upload Data <span class="badge-pill">Up to 50GB</span>
+    </button>
+    <a href="playground.html" class="action-btn playground-btn" id="playgroundLink">
+      <span class="btn-icon" style="color:var(--warning);">⚡</span>
+      <span>SQL Playground</span>
+      <span class="badge-pill duckdb-pill">DuckDB</span>
+    </a>
+    <button class="action-btn schema-toggle" id="schemaToggle" aria-expanded="false" aria-controls="schemaPanel">
+      <span class="btn-icon">⌗</span> View Schema <span class="table-count-badge" id="tableCountBadge">0</span>
+    </button>
+  </div>
+</header>
+
+<!-- Backdrop Overlay for Drawer & Modal -->
+<div class="backdrop-overlay" id="backdropOverlay" hidden></div>
+
+<!-- Schema & Table Management Drawer -->
+<aside class="schema-panel" id="schemaPanel" hidden aria-label="Database Schema and Tables">
+  <div class="panel-header">
+    <div class="panel-title-wrap">
+      <h2 class="panel-title">Database Schema</h2>
+      <span class="panel-subtitle" id="panelSubtitle">Live Introspected Schema</span>
+    </div>
+    <button class="close-icon-btn" id="schemaCloseBtn" aria-label="Close schema panel" title="Close (Esc)">✕</button>
+  </div>
+
+  <div class="panel-tabs">
+    <button class="panel-tab active" id="tabTablesBtn" type="button">Tables &amp; Data</button>
+    <button class="panel-tab" id="tabRawSchemaBtn" type="button">AI Prompt Schema</button>
+  </div>
+
+  <div class="panel-body">
+    <!-- Tab 1: Tables List & Quick Inspection -->
+    <div class="tab-pane active" id="paneTables">
+      <div class="tables-toolbar">
+        <span class="tables-count-text" id="tablesCountText">Loading tables…</span>
+        <button class="refresh-mini-btn" id="refreshTablesBtn" title="Refresh tables">↻ Refresh</button>
+      </div>
+      <div class="tables-list" id="tablesList">
+        <!-- Dynamically injected table cards -->
+      </div>
+    </div>
+
+    <!-- Tab 2: Raw Schema string -->
+    <div class="tab-pane" id="paneRawSchema">
+      <div class="schema-copy-bar">
+        <span>Format provided to NVIDIA AI:</span>
+        <button class="copy-btn" id="copySchemaBtn" type="button">Copy</button>
+      </div>
+      <pre id="schemaContent" class="schema-content">Loading schema…</pre>
+    </div>
+  </div>
+</aside>
+
+<!-- Data Upload Modal (Supports up to 50GB files: Parquet, CSV, SQL, JSON, Excel, SQLite) -->
+<div class="modal-dialog" id="uploadModal" hidden role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+  <div class="modal-card">
+    <div class="modal-header">
+      <div>
+        <h2 class="modal-title" id="modalTitle">Upload &amp; Ingest Dataset</h2>
+        <p class="modal-subtitle">Direct streaming ingestion into PostgreSQL. Maximum file limit: <strong>50 GB</strong>.</p>
+      </div>
+      <button class="close-icon-btn" id="uploadCloseBtn" aria-label="Close modal" title="Close (Esc)">✕</button>
+    </div>
+
+    <div class="format-badges">
+      <span class="format-pill">CSV / TSV</span>
+      <span class="format-pill highlight">Parquet</span>
+      <span class="format-pill">SQL Dump</span>
+      <span class="format-pill">JSON / JSONL</span>
+      <span class="format-pill">Excel (.xlsx)</span>
+      <span class="format-pill">SQLite (.db)</span>
+    </div>
+
+    <form id="uploadForm" class="upload-form">
+      <div class="dropzone" id="dropzone">
+        <input type="file" id="fileInput" name="file" class="file-input" accept=".csv,.tsv,.txt,.parquet,.sql,.json,.jsonl,.ndjson,.xlsx,.xls,.sqlite,.sqlite3,.db" required>
+        <div class="dropzone-content">
+          <div class="dropzone-icon">⇪</div>
+          <p class="dropzone-main-text">Drag &amp; drop your database file here, or <span class="browse-link">browse</span></p>
+          <p class="dropzone-sub-text">Supported: .parquet, .csv, .sql, .json, .xlsx, .sqlite (up to 50GB)</p>
+          <div class="selected-file-info" id="selectedFileInfo" hidden>
+            <span class="file-icon">📄</span>
+            <span class="file-name" id="selectedFileName">dataset.parquet</span>
+            <span class="file-size" id="selectedFileSize">(0 MB)</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label for="customTableName">Target Table Name (Optional):</label>
+        <input type="text" id="customTableName" name="table_name" placeholder="Auto-generated from filename (e.g. sales_2024)" pattern="[a-zA-Z_][a-zA-Z0-9_]*" title="Must start with a letter or underscore and contain only alphanumeric characters">
+      </div>
+
+      <!-- Upload / Ingestion Progress Status -->
+      <div class="upload-progress-box" id="uploadProgressBox" hidden>
+        <div class="progress-info">
+          <span class="progress-label" id="progressStatusLabel">Uploading file…</span>
+          <span class="progress-percent" id="progressPercent">0%</span>
+        </div>
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill" id="progressBarFill"></div>
+        </div>
+        <div class="progress-detail" id="progressDetail">Streaming data chunks to server…</div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn-cancel" id="cancelUploadBtn">Cancel</button>
+        <button type="submit" class="btn-submit" id="submitUploadBtn">
+          <span>Start Ingestion</span> →
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Main Application Layout -->
+<main class="app-main">
+  <section class="hero" id="hero">
+    <p class="hero-eyebrow">Interactive PostgreSQL · Powered by NVIDIA AI</p>
+    <h1 class="hero-title">Ask your database<br>a question, in plain English.</h1>
+    <p class="hero-sub">NVIDIA AI inspects your tables, generates safe read-only SQL, and streams results instantly. Upload your own data or query existing tables.</p>
+  </section>
+
+  <section class="query-console">
+    <form id="queryForm" class="query-form">
+      <label for="questionInput" class="visually-hidden">Your question</label>
+      <div class="input-row">
+        <span class="input-prefix" aria-hidden="true">?</span>
+        <input
+          type="text"
+          id="questionInput"
+          name="question"
+          placeholder="e.g. Which customers spent the most last month?"
+          autocomplete="off"
+          maxlength="500"
+          required
+        >
+        <button type="submit" class="run-btn" id="runBtn">
+          <span class="run-btn-label">Run</span>
+          <span class="run-btn-key">↵</span>
+        </button>
+      </div>
+    </form>
+
+    <div class="example-chips-wrap">
+      <span class="chips-label">Suggested queries:</span>
+      <div class="example-chips" id="exampleChips">
+        <button class="chip" type="button" data-question="Show me the top 5 customers by total spend">Top spenders</button>
+        <button class="chip" type="button" data-question="Which products are low on stock, under 30 units?">Low stock</button>
+        <button class="chip" type="button" data-question="How many orders were cancelled?">Cancelled orders</button>
+        <button class="chip" type="button" data-question="What is the total revenue by product category?">Revenue by category</button>
+        <button class="chip" type="button" data-question="List all available tables and their total row counts">Table row counts</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="results-area" id="resultsArea" aria-live="polite">
+    <!-- Populated dynamically: loading / error / sql-receipt + results table -->
+  </section>
+</main>
+
+<footer class="app-footer">
+  <p>Built with FastAPI, PostgreSQL &amp; the NVIDIA API · Supports streaming ingestion up to 50 GB · Read-only query execution</p>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
