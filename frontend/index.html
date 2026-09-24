@@ -6,8 +6,8 @@
 <title>Queryable — Ask your database anything</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=3">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css?v=11">
 </head>
 <body>
 
@@ -21,16 +21,16 @@
     <span class="brand-badge" id="dbStatusBadge">Live DB</span>
   </div>
   <div class="header-actions">
-    <button class="action-btn upload-btn" id="uploadToggle" aria-haspopup="dialog">
-      <span class="btn-icon">↑</span> Upload Data <span class="badge-pill">Up to 50GB</span>
+    <button class="action-btn upload-btn ripple-origin" id="uploadToggle" aria-haspopup="dialog" data-tooltip="Stream files up to 50 GB into PostgreSQL">
+      <span class="btn-icon">↑</span> Upload Data <span class="badge-pill">50 GB</span>
     </button>
-    <a href="playground.html" class="action-btn playground-btn" id="playgroundLink">
+    <a href="playground.html" class="action-btn playground-btn ripple-origin" id="playgroundLink" data-tooltip="High-performance DuckDB analytics playground">
       <span class="btn-icon" style="color:var(--warning);">⚡</span>
       <span>SQL Playground</span>
       <span class="badge-pill duckdb-pill">DuckDB</span>
     </a>
-    <button class="action-btn schema-toggle" id="schemaToggle" aria-expanded="false" aria-controls="schemaPanel">
-      <span class="btn-icon">⌗</span> View Schema <span class="table-count-badge" id="tableCountBadge">0</span>
+    <button class="action-btn schema-toggle ripple-origin" id="schemaToggle" aria-expanded="false" aria-controls="schemaPanel" data-tooltip="View live database schema">
+      <span class="btn-icon">⌗</span> Schema <span class="table-count-badge" id="tableCountBadge">0</span>
     </button>
   </div>
 </header>
@@ -68,7 +68,7 @@
     <!-- Tab 2: Raw Schema string -->
     <div class="tab-pane" id="paneRawSchema">
       <div class="schema-copy-bar">
-        <span>Format provided to NVIDIA AI:</span>
+        <span>Format provided to LLM:</span>
         <button class="copy-btn" id="copySchemaBtn" type="button">Copy</button>
       </div>
       <pre id="schemaContent" class="schema-content">Loading schema…</pre>
@@ -141,9 +141,9 @@
 <!-- Main Application Layout -->
 <main class="app-main">
   <section class="hero" id="hero">
-    <p class="hero-eyebrow">Interactive PostgreSQL · Powered by NVIDIA AI</p>
+    <p class="hero-eyebrow">Interactive Database Analytics · AI-Powered SQL</p>
     <h1 class="hero-title">Ask your database<br>a question, in plain English.</h1>
-    <p class="hero-sub">NVIDIA AI inspects your tables, generates safe read-only SQL, and streams results instantly. Upload your own data or query existing tables.</p>
+    <p class="hero-sub">Intelligent Natural Language to SQL — inspects your schema, generates safe read-only queries, and returns instant results. Upload any dataset or query existing tables.</p>
   </section>
 
   <section class="query-console">
@@ -160,7 +160,7 @@
           maxlength="500"
           required
         >
-        <button type="submit" class="run-btn" id="runBtn">
+        <button type="submit" class="run-btn ripple-origin" id="runBtn">
           <span class="run-btn-label">Run</span>
           <span class="run-btn-key">↵</span>
         </button>
@@ -170,11 +170,11 @@
     <div class="example-chips-wrap">
       <span class="chips-label">Suggested queries:</span>
       <div class="example-chips" id="exampleChips">
-        <button class="chip" type="button" data-question="Show me the top 5 customers by total spend">Top spenders</button>
-        <button class="chip" type="button" data-question="Which products are low on stock, under 30 units?">Low stock</button>
-        <button class="chip" type="button" data-question="How many orders were cancelled?">Cancelled orders</button>
-        <button class="chip" type="button" data-question="What is the total revenue by product category?">Revenue by category</button>
-        <button class="chip" type="button" data-question="List all available tables and their total row counts">Table row counts</button>
+        <button class="chip ripple-origin" type="button" data-question="Show me the top 5 customers by total spend">Top spenders</button>
+        <button class="chip ripple-origin" type="button" data-question="Which products are low on stock, under 30 units?">Low stock</button>
+        <button class="chip ripple-origin" type="button" data-question="How many orders were cancelled?">Cancelled orders</button>
+        <button class="chip ripple-origin" type="button" data-question="What is the total revenue by product category?">Revenue by category</button>
+        <button class="chip ripple-origin" type="button" data-question="List all available tables and their total row counts">Table row counts</button>
       </div>
     </div>
   </section>
@@ -185,7 +185,7 @@
 </main>
 
 <footer class="app-footer">
-  <p>Built with FastAPI, PostgreSQL &amp; the NVIDIA API · Supports streaming ingestion up to 50 GB · Read-only query execution</p>
+  <p>Built with FastAPI, PostgreSQL &amp; Multi-LLM API · Supports streaming ingestion up to 50 GB · Read-only query execution</p>
 </footer>
 
 <script src="app.js"></script>

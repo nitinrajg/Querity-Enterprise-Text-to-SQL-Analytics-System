@@ -99,6 +99,25 @@ function closeAllOverlays() {
   closeUploadModal();
 }
 
+// =========================================================
+// Micro-interaction: Ripple effect on .ripple-origin elements
+// =========================================================
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".ripple-origin");
+  if (!btn) return;
+  const rect = btn.getBoundingClientRect();
+  const size = Math.max(rect.width, rect.height) * 2;
+  const ripple = document.createElement("span");
+  ripple.className = "ripple";
+  ripple.style.cssText = `
+    width: ${size}px; height: ${size}px;
+    left: ${e.clientX - rect.left - size / 2}px;
+    top: ${e.clientY - rect.top - size / 2}px;
+  `;
+  btn.appendChild(ripple);
+  ripple.addEventListener("animationend", () => ripple.remove());
+});
+
 // Event Listeners for Opening & Closing
 schemaToggle.addEventListener("click", () => {
   if (schemaPanel.hasAttribute("hidden")) {
@@ -466,7 +485,7 @@ queryForm.addEventListener("submit", async (e) => {
   if (!question) return;
 
   setLoading(true);
-  renderLoadingState("NVIDIA AI is reading database schema & generating SQL…");
+  renderLoadingState("AI is reading database schema & generating SQL…");
 
   try {
     const res = await fetch(`${API_BASE}/api/query`, {

@@ -1,14 +1,16 @@
 # ⚡ Queryable — Enterprise Text-to-SQL & Analytical Agent
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115.0+-009688.svg?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14+-336791.svg?style=flat&logo=postgresql&logoColor=white)](https://www.postgresql.org)
+[![Google Gemini](https://img.shields.io/badge/Google%20Gemini-2.5%20Flash-4285F4.svg?style=flat&logo=google&logoColor=white)](https://ai.google.dev)
 [![NVIDIA NIM](https://img.shields.io/badge/NVIDIA%20NIM-Llama--3.3--70B-76B900.svg?style=flat&logo=nvidia&logoColor=white)](https://build.nvidia.com)
+[![Groq](https://img.shields.io/badge/Groq-LPU%20Inference-F55036.svg?style=flat&logo=groq&logoColor=white)](https://groq.com)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14+%20|%20Neon%20DB-336791.svg?style=flat&logo=postgresql&logoColor=white)](https://www.postgresql.org)
 [![DuckDB](https://img.shields.io/badge/DuckDB-1.1.0+-FFF000.svg?style=flat&logo=duckdb&logoColor=black)](https://duckdb.org)
 [![PyArrow](https://img.shields.io/badge/PyArrow-15.0+-D22128.svg?style=flat&logo=apache&logoColor=white)](https://arrow.apache.org)
 [![Python](https://img.shields.io/badge/Python-3.10%20|%203.11%20|%203.12-3776AB.svg?style=flat&logo=python&logoColor=white)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg?style=flat)](LICENSE)
 
-> **Queryable** is an intelligent, high-performance Text-to-SQL agent and analytical playground. It translates plain-English business questions into executable, read-only SQL using state-of-the-art LLMs (NVIDIA NIM / Groq), validates queries through a defense-in-depth safety engine, runs them against live PostgreSQL databases, and provides an in-memory DuckDB analytical engine with a 50GB multi-format streaming ingestion pipeline.
+> **Queryable** is a production-grade, enterprise-ready Natural Language to SQL (Text-to-SQL) autonomous agent and analytical playground. It translates plain-English business queries into deterministic, read-only SQL across **Multi-LLM providers (Google Gemini, NVIDIA NIM, Groq, and Grok)**, enforces a zero-trust defense-in-depth safety engine, executes queries against live **PostgreSQL (local or Neon DB)**, and integrates an embedded **in-memory DuckDB OLAP engine** backed by a **50GB multi-format streaming ingestion pipeline**.
 
 ---
 
@@ -56,12 +58,13 @@
 
 | Capability | Description |
 | :--- | :--- |
-| 🧠 **Autonomous NL-to-SQL** | Converts conversational questions into deterministic, highly optimized PostgreSQL queries via NVIDIA NIM (`meta/llama-3.3-70b-instruct`) and Groq endpoints. |
-| 🛡️ **Defense-in-Depth Security** | Multi-tiered query validation enforcing AST keyword blacklists, single-statement verification, injection prevention, automatic `LIMIT` enforcement, and read-only transactions with timeouts. |
-| ⚡ **Dual Engine (Postgres + DuckDB)** | Combines relational persistence in PostgreSQL with blazing-fast columnar OLAP in an in-memory DuckDB engine with automatic table replication. |
+| 🧠 **Autonomous Multi-LLM NL-to-SQL** | Converts conversational questions into deterministic, highly optimized PostgreSQL queries with automatic routing across **Google Gemini** (`gemini-2.5-flash`), **NVIDIA NIM** (`meta/llama-3.3-70b-instruct`), **Groq** (`llama-3.3-70b-versatile`), and **xAI Grok**. |
+| 🛡️ **Zero-Trust SQL Guardrails** | Multi-tiered query validation enforcing AST keyword blacklists, single-statement verification, injection prevention, automatic `LIMIT` enforcement, and read-only transactions with timeouts on both PostgreSQL and DuckDB. |
+| ⚡ **Dual Engine (Postgres + DuckDB)** | Combines relational persistence in PostgreSQL (local or cloud Neon DB) with blazing-fast columnar OLAP in an in-memory DuckDB engine with automatic table replication. |
 | 🚀 **50GB Streaming Ingestion** | Zero-memory-spike disk-chunk streaming supporting Apache Parquet, CSV, TSV, SQL scripts, JSON, JSONL, Excel (.xlsx), and SQLite (.db). |
 | 🔍 **Live Catalog Introspection** | Automatically scans PostgreSQL `information_schema`, tracks foreign keys, computes dynamic row counts, and injects updated context into AI system instructions. |
 | 🎛️ **Interactive SQL Playground** | Dedicated developer workspace with instant execution, smart SQL autocomplete (keywords, tables, columns, functions), execution profiling, and CSV/JSON export. |
+| 🎨 **Liquid Glassmorphism UI** | Modern cyberpunk-inspired dark aesthetic with Google Fonts (`Inter` + `JetBrains Mono`), capsule/pill form factors, dynamic gradient finishes, scanline overlays, and micro-interactions. |
 | 🔄 **Zero-Downtime Hot Reloading** | Dynamically reloads `.env` configuration (API keys, models, base URLs) without requiring backend server restarts. |
 | 🚦 **Adaptive Rate Limiting & Backoff** | Integrated sliding-window token limiter (60 RPM, 5000 RPD) with exponential backoff on upstream API spikes (429, 503, 504). |
 
@@ -324,12 +327,16 @@ http://localhost:5500/playground.html
 
 | Variable | Type | Default Value | Description |
 | :--- | :--- | :--- | :--- |
-| `DATABASE_URL` | `string` | `postgresql://localhost:5432/text2sql_demo` | Asyncpg PostgreSQL connection URI format: `postgresql://user:password@host:port/dbname`. |
-| `NVIDIA_API_KEY` | `string` | `""` | API key from NVIDIA NIM (`nvapi-...`) or Groq (`gsk_...`). |
+| `DATABASE_URL` | `string` | `postgresql://localhost:5432/text2sql_demo` | PostgreSQL connection URI. Supports local instances and cloud databases like **Neon** (`postgresql://...sslmode=require&channel_binding=require`). |
+| `GOOGLE_API_KEY` | `string` | `""` | Google AI Studio API key (`AIzaSy...`). When set, automatically activates the Gemini engine. |
+| `GEMINI_MODEL` | `string` | `gemini-2.5-flash` | Gemini model name (e.g. `gemini-2.5-flash`, `gemini-1.5-flash`, `gemini-1.5-pro`). |
+| `NVIDIA_API_KEY` | `string` | `""` | API key from NVIDIA NIM (`nvapi-...`). |
 | `NVIDIA_MODEL` | `string` | `meta/llama-3.3-70b-instruct` | LLM model identifier for SQL code generation. |
-| `NVIDIA_BASE_URL` | `string` | `https://integrate.api.nvidia.com/v1` | Base URL for the OpenAI-compatible inference endpoint. |
-| `GROQ_API_KEY` | `string` | `""` | Optional explicit Groq API key for high-speed inference. |
-| `GROQ_MODEL` | `string` | `llama-3.3-70b-versatile` | Optional Groq model identifier. |
+| `NVIDIA_BASE_URL` | `string` | `https://integrate.api.nvidia.com/v1` | Base URL for OpenAI-compatible endpoints (NVIDIA NIM, Grok, Ollama). |
+| `GROQ_API_KEY` | `string` | `""` | Groq API key (`gsk_...`) for ultra-low latency LPU inference. |
+| `GROQ_MODEL` | `string` | `llama-3.3-70b-versatile` | Groq model identifier. |
+| `XAI_API_KEY` | `string` | `""` | Optional xAI Grok API key. |
+| `XAI_MODEL` | `string` | `grok-beta` | Optional xAI Grok model identifier. |
 
 ---
 
@@ -527,10 +534,14 @@ Executes raw SQL queries against PostgreSQL inside a safe read-only transaction.
 
 ## 🔬 Deep Dive: Core Components
 
-### 1. AI & LLM Integration (`nvidia_client.py`)
-- **Model Endpoints:** Connects to NVIDIA NIM foundation models (`meta/llama-3.3-70b-instruct`) and auto-detects Groq keys (`gsk_...`) for high-throughput failover.
-- **Strict Prompt Engineering:** Enforces single-statement read-only rules, output without markdown fences, and dynamic injection of the live schema catalog.
-- **Sliding-Window Rate Limiter:** Protects upstream token quotas with a per-minute and per-day memory deque:
+### 1. Multi-LLM Provider Engine (`nvidia_client.py`)
+- **Dynamic Provider Routing:** Automatically selects the optimal AI engine based on active credentials:
+  1. **Google Gemini (`gemini-2.5-flash` / `gemini-1.5-flash`):** Uses official `google-genai` SDK with automated payload formatting and zero-temperature deterministic SQL generation.
+  2. **NVIDIA NIM (`meta/llama-3.3-70b-instruct`):** Connects to NVIDIA enterprise inference microservices for complex schema reasoning.
+  3. **Groq LPU (`llama-3.3-70b-versatile`):** Sub-second ultra-low latency inference via Groq's Language Processing Units.
+  4. **xAI Grok & OpenAI-Compatible Endpoints:** Configurable base URL support for self-hosted or alternative API providers.
+- **Strict Few-Shot Prompt Engineering:** Enforces single-statement read-only rules, strict exclusion of markdown fences, syntax-compliant column escaping, and live catalog context injection.
+- **Sliding-Window Rate Limiter:** Protects upstream token quotas with a dual-tiered sliding memory deque:
   $$\text{Capacity} = 60\text{ RPM} \quad \text{and} \quad 5000\text{ RPD}$$
 - **Exponential Backoff:** Automatically retries transient network interruptions and HTTP 429 / 5xx responses with adaptive intervals ($1.5\text{s} \to 3.0\text{s} \to 5.0\text{s}$).
 - **Dynamic Hot Reloading:** Re-reads `.env` on every request invocation so changes to API keys or model names take effect immediately without stopping Uvicorn.
@@ -560,8 +571,10 @@ Even before touching database permissions, all generated queries pass through `v
 - **PyArrow Synchronization Bridge:** Automatically transforms PostgreSQL records into PyArrow tables (`pa.Table.from_pylist`) and registers them as native DuckDB tables without disk roundtrips.
 - Pre-seeded with realistic e-commerce datasets (`customers`, `products`, `orders`).
 
-### 6. High-Precision Frontend & Smart Autocomplete
-- **Zero-Dependency Architecture:** Pure Vanilla JavaScript, CSS variables, semantic HTML5.
+### 6. Modern Liquid Glass UI & Design System
+- **Zero-Dependency Architecture:** Pure Vanilla JavaScript, CSS custom properties, and semantic HTML5.
+- **Capsule Form Factors:** High-aesthetic pill design system (`border-radius: var(--radius-full)`) across buttons, chips, and modal triggers.
+- **Curated Gradients & Micro-Interactions:** Subtle luminous glows, animated loading dots, ripple origin effects, and custom scanline overlays.
 - **Smart SQL Autocomplete:** In-editor popup offering real-time keyword suggestions, table names, dynamic column suggestions, and DuckDB analytical macros.
 - **Keyboard Navigation:** Full keyboard navigation (`↑`/`↓` to traverse suggestions, `Tab`/`Enter` to insert, `Ctrl+Enter` to execute).
 - **Export & Formatter:** Integrated SQL query beautifier, clipboard copying, and client-side CSV/JSON export.
@@ -593,7 +606,7 @@ Queryable adheres to strict security standards to ensure user safety when execut
    [ Rate Limiter Deque ] ──► (Reject 429 if > 60 RPM or 5000 RPD)
             │
             ▼
-[ NVIDIA NIM LLM Prompt ] ──► (System prompt enforces read-only SELECT)
+[ Multi-LLM Provider Prompt ] ──► (Google Gemini / NVIDIA NIM / Groq with read-only system instruction)
             │
             ▼
    [ SQL Guard Validator ] ──► (Block destructive keywords, check single statement, force LIMIT)
@@ -605,10 +618,12 @@ Queryable adheres to strict security standards to ensure user safety when execut
  [ Hard Truncation Guard ] ──► (Truncate output to MAX_ROWS = 100)
 ```
 
-1. **Read-Only Transaction Isolation:** All queries run inside `async with conn.transaction(readonly=True)`. Even if an exploit bypasses the string guard, the database kernel strictly aborts any write operations.
+1. **Read-Only Transaction Isolation:** All PostgreSQL queries run inside `async with conn.transaction(readonly=True)`. Even if an exploit bypasses the string guard, the database kernel strictly aborts any write operations.
 2. **Statement Timeouts:** PostgreSQL `statement_timeout` is set to 5000ms (5 seconds) to prevent Denial of Service (DoS) attacks via expensive Cartesian joins.
-3. **Safe Identifier Regex:** All user-supplied table names and columns are sanitized using `^[a-zA-Z_][a-zA-Z0-9_]{0,62}$`.
-4. **Environment Isolation:** Secrets are isolated in `backend/.env` which is ignored in [.gitignore](.gitignore).
+3. **DuckDB Filesystem Sandbox Guardrail:** All DuckDB playground queries are validated before execution to prohibit file-system inspection functions (`read_csv`, `read_parquet`, `copy`, `install`, `load`, `pragma_database_list`).
+4. **Safe Identifier Sanitization:** All user-supplied table names and columns are sanitized using `^[a-zA-Z_][a-zA-Z0-9_]{0,62}$`.
+5. **Origin-Restricted CORS Policy:** Cross-Origin Resource Sharing is locked down to authorized local frontend origins to prevent cross-site request forgery and data exfiltration.
+6. **Environment Secret Isolation:** Credentials reside strictly in `backend/.env` which is ignored in [.gitignore](.gitignore).
 
 ---
 
