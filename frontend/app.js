@@ -292,7 +292,8 @@ window.confirmDeleteTable = async function(tableName) {
 };
 
 // =========================================================
-// Data Ingestion & Large File Upload (Up to 50 GB)
+// =========================================================
+// Data Ingestion & Multi-File Upload (Up to 50 GB)
 // =========================================================
 
 function formatBytes(bytes) {
@@ -303,23 +304,66 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
 
-function handleFileSelection(file) {
-  if (!file) return;
+function updateFormatPills(files) {
+  const pills = document.querySelectorAll("#formatBadges .format-pill");
+  pills.forEach(p => p.classList.remove("highlight"));
 
-  selectedFileName.textContent = file.name;
-  selectedFileSize.textContent = `(${formatBytes(file.size)})`;
-  selectedFileInfo.removeAttribute("hidden");
+  if (!files || files.length === 0) return;
 
-  if (!customTableName.value.trim()) {
-    const baseName = file.name.replace(/\.[^/.]+$/, "");
+  const extMap = {
+    ".csv": "csv", ".tsv": "csv", ".txt": "csv",
+    ".parquet": "parquet",
+    ".sql": "sql",
+    ".json": "json", ".jsonl": "json", ".ndjson": "json",
+    ".xlsx": "xlsx", ".xls": "xlsx",
+    ".sqlite": "sqlite", ".sqlite3": "sqlite", ".db": "sqlite",
+    ".zip": "zip"
+  };
+
+  const detectedFormats = new Set();
+  Array.from(files).forEach(f => {
+    const ext = "." + f.name.split(".").pop().toLowerCase();
+    const fmt = extMap[ext];
+    if (fmt) detectedFormats.add(fmt);
+  });
+
+  detectedFormats.forEach(fmt => {
+    const match = document.querySelector(`#formatBadges .format-pill[data-format="${fmt}"]`);
+    if (match) match.classList.add("highlight");
+  });
+}
+
+function handleFilesSelection(files) {
+  if (!files || files.length === 0) {
+    resetUploadForm();
+    return;
+  }
+
+  const fileList = Array.from(files);
+  const totalSize = fileList.reduce((acc, f) => acc + f.size, 0);
+
+  if (fileList.length === 1) {
+    const single = fileList[0];
+    selectedFileName.textContent = single.name;
+    selectedFileSize.textContent = `(${formatBytes(single.size)})`;
+    const baseName = single.name.replace(/\.[^/.]+$/, "");
     const cleanName = baseName.replace(/[^a-zA-Z0-9_]+/g, "_").toLowerCase().slice(0, 50);
     customTableName.placeholder = cleanName;
+  } else {
+    const names = fileList.map(f => f.name);
+    const previewNames = names.slice(0, 3).join(", ") + (names.length > 3 ? ` +${names.length - 3} more` : "");
+    selectedFileName.textContent = `${fileList.length} files: ${previewNames}`;
+    selectedFileSize.textContent = `(${formatBytes(totalSize)})`;
+    customTableName.placeholder = `Auto-generated from ${fileList.length} filenames`;
   }
+
+  selectedFileInfo.removeAttribute("hidden");
+  updateFormatPills(fileList);
 }
 
 fileInput.addEventListener("change", () => {
-  if (fileInput.files.length > 0) {
-    handleFileSelection(fileInput.files[0]);
+  if (fileInput.files && fileInput.files.length > 0) {
+    handleFilesSelection(fileInput.files);
   }
 });
 
@@ -343,9 +387,9 @@ fileInput.addEventListener("change", () => {
 dropzone.addEventListener("drop", (e) => {
   const dt = e.dataTransfer;
   const files = dt.files;
-  if (files.length > 0) {
+  if (files && files.length > 0) {
     fileInput.files = files;
-    handleFileSelection(files[0]);
+    handleFilesSelection(files);
   }
 });
 
@@ -356,34 +400,42 @@ function resetUploadForm() {
   submitUploadBtn.disabled = false;
   submitUploadBtn.innerHTML = "<span>Start Ingestion</span> →";
   progressBarFill.style.width = "0%";
+  progressBarFill.style.backgroundColor = "";
   progressPercent.textContent = "0%";
+  updateFormatPills([]);
 }
 
 uploadForm.addEventListener("submit", (e) => {
   e.preventDefault();
-  const file = fileInput.files[0];
-  if (!file) {
-    alert("Please select a file to upload.");
+  const files = fileInput.files;
+  if (!files || files.length === 0) {
+    alert("Please select one or more files to upload.");
     return;
   }
 
+  const fileList = Array.from(files);
+  const totalBytes = fileList.reduce((acc, f) => acc + f.size, 0);
+
   // 50 GB client-side sanity check
   const MAX_BYTES = 50 * 1024 * 1024 * 1024;
-  if (file.size > MAX_BYTES) {
-    alert("File exceeds the 50 GB maximum limit.");
+  if (totalBytes > MAX_BYTES) {
+    alert("Total upload size exceeds the 50 GB maximum limit.");
     return;
   }
 
   submitUploadBtn.disabled = true;
   submitUploadBtn.textContent = "Ingesting…";
   uploadProgressBox.removeAttribute("hidden");
-  progressStatusLabel.textContent = "Uploading file to server…";
+  progressStatusLabel.textContent = `Uploading ${fileList.length} file(s) to server…`;
   progressPercent.textContent = "0%";
   progressBarFill.style.width = "0%";
-  progressDetail.textContent = `Streaming ${formatBytes(file.size)}…`;
+  progressBarFill.style.backgroundColor = "";
+  progressDetail.textContent = `Streaming ${formatBytes(totalBytes)}…`;
 
   const formData = new FormData();
-  formData.append("file", file);
+  fileList.forEach(file => {
+    formData.append("files", file);
+  });
   if (customTableName.value.trim()) {
     formData.append("table_name", customTableName.value.trim());
   }
@@ -391,7 +443,6 @@ uploadForm.addEventListener("submit", (e) => {
   const xhr = new XMLHttpRequest();
   xhr.open("POST", `${API_BASE}/api/upload`, true);
 
-  // Upload progress tracking
   xhr.upload.onprogress = (event) => {
     if (event.lengthComputable) {
       const percent = Math.round((event.loaded / event.total) * 100);
@@ -401,7 +452,7 @@ uploadForm.addEventListener("submit", (e) => {
 
       if (percent === 100) {
         progressStatusLabel.textContent = "Parsing & Ingesting into PostgreSQL…";
-        progressDetail.textContent = "Creating table schema and streaming records…";
+        progressDetail.textContent = "Creating table schemas, indexing join keys & syncing to DuckDB…";
       }
     }
   };
@@ -426,15 +477,16 @@ uploadForm.addEventListener("submit", (e) => {
       setTimeout(() => {
         closeUploadModal();
         const details = resp.details || {};
-        const tableName = details.table_name || "your table";
-        const rows = details.rows_inserted || 0;
+        const tableName = details.table_name || resp.message || "your tables";
+        const rows = resp.total_rows !== undefined ? resp.total_rows : (details.rows_inserted || 0);
+        const count = resp.files_count || fileList.length;
         
         resultsArea.innerHTML = `
-          <div class="state-panel" style="border-color: var(--accent); background: rgba(63, 185, 80, 0.08);">
-            <p style="font-weight: 600; color: var(--accent); margin: 0 0 6px;">✓ Successfully Ingested Dataset</p>
-            <p style="font-size: 13px; margin: 0 0 12px;">Created table <strong>${escapeHtml(tableName)}</strong> with ${rows} records.</p>
-            <button class="chip" onclick="queryTable('${escapeHtml(tableName)}')">
-              Ask AI about ${escapeHtml(tableName)} →
+          <div class="state-panel" style="border-color: var(--accent); background: rgba(0, 255, 102, 0.08);">
+            <p style="font-weight: 700; color: var(--accent); margin: 0 0 6px;">✓ Successfully Ingested ${count} Dataset${count === 1 ? '' : 's'}</p>
+            <p style="font-size: 13.5px; margin: 0 0 12px; color: var(--text);">Created table(s): <strong style="color:var(--accent-blue);">${escapeHtml(tableName)}</strong> (${rows} total records).</p>
+            <button class="chip" onclick="openSchemaPanel()">
+              View Schema &amp; Join Paths →
             </button>
           </div>
         `;

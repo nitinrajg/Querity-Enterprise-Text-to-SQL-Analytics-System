@@ -3,11 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Queryable — Ask your database anything</title>
+<title>Querity — Ask your database anything</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=11">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css?v=13">
 </head>
 <body>
 
@@ -17,7 +17,7 @@
 <header class="app-header">
   <div class="brand">
     <span class="brand-mark">▸_</span>
-    <span class="brand-name">Queryable</span>
+    <span class="brand-name">Querity</span>
     <span class="brand-badge" id="dbStatusBadge">Live DB</span>
   </div>
   <div class="header-actions">
@@ -87,25 +87,26 @@
       <button class="close-icon-btn" id="uploadCloseBtn" aria-label="Close modal" title="Close (Esc)">✕</button>
     </div>
 
-    <div class="format-badges">
-      <span class="format-pill">CSV / TSV</span>
-      <span class="format-pill highlight">Parquet</span>
-      <span class="format-pill">SQL Dump</span>
-      <span class="format-pill">JSON / JSONL</span>
-      <span class="format-pill">Excel (.xlsx)</span>
-      <span class="format-pill">SQLite (.db)</span>
+    <div class="format-badges" id="formatBadges">
+      <span class="format-pill" data-format="csv">CSV / TSV</span>
+      <span class="format-pill" data-format="parquet">Parquet</span>
+      <span class="format-pill" data-format="sql">SQL Dump</span>
+      <span class="format-pill" data-format="json">JSON / JSONL</span>
+      <span class="format-pill" data-format="xlsx">Excel (.xlsx)</span>
+      <span class="format-pill" data-format="sqlite">SQLite (.db)</span>
+      <span class="format-pill" data-format="zip">ZIP (.zip)</span>
     </div>
 
     <form id="uploadForm" class="upload-form">
       <div class="dropzone" id="dropzone">
-        <input type="file" id="fileInput" name="file" class="file-input" accept=".csv,.tsv,.txt,.parquet,.sql,.json,.jsonl,.ndjson,.xlsx,.xls,.sqlite,.sqlite3,.db" required>
+        <input type="file" id="fileInput" name="files" class="file-input" accept=".csv,.tsv,.txt,.parquet,.sql,.json,.jsonl,.ndjson,.xlsx,.xls,.sqlite,.sqlite3,.db,.zip" multiple required>
         <div class="dropzone-content">
           <div class="dropzone-icon">⇪</div>
-          <p class="dropzone-main-text">Drag &amp; drop your database file here, or <span class="browse-link">browse</span></p>
-          <p class="dropzone-sub-text">Supported: .parquet, .csv, .sql, .json, .xlsx, .sqlite (up to 50GB)</p>
+          <p class="dropzone-main-text">Drag &amp; drop single or multiple database files here, or <span class="browse-link">browse</span></p>
+          <p class="dropzone-sub-text">Upload single or multiple .csv, .parquet, .xlsx, .json, .sqlite, .zip (up to 50GB)</p>
           <div class="selected-file-info" id="selectedFileInfo" hidden>
-            <span class="file-icon">📄</span>
-            <span class="file-name" id="selectedFileName">dataset.parquet</span>
+            <span class="file-icon" id="selectedFileIcon">📄</span>
+            <span class="file-name" id="selectedFileName">dataset.csv</span>
             <span class="file-size" id="selectedFileSize">(0 MB)</span>
           </div>
         </div>
@@ -188,6 +189,6 @@
   <p>Built with FastAPI, PostgreSQL &amp; Multi-LLM API · Supports streaming ingestion up to 50 GB · Read-only query execution</p>
 </footer>
 
-<script src="app.js"></script>
+<script src="app.js?v=4"></script>
 </body>
 </html>

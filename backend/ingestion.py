@@ -7,8 +7,9 @@ Supported Formats:
 - Apache Parquet (.parquet)
 - SQL dumps and scripts (.sql)
 - JSON / JSON Lines (.json, .jsonl, .ndjson)
-- Microsoft Excel (.xlsx, .xls)
-- SQLite databases (.sqlite, .sqlite3, .db)
+- Microsoft Excel (.xlsx, .xls) — single and multi-sheet workbooks
+- SQLite databases (.sqlite, .sqlite3, .db) — multi-table databases
+- ZIP Archives (.zip) — multi-file dataset packages
 """
 
 import os
@@ -16,10 +17,13 @@ import re
 import csv
 import json
 import sqlite3
+import zipfile
+import tempfile
+import shutil
 import logging
 import asyncio
 from pathlib import Path
-from typing import Any, AsyncGenerator, Tuple
+from typing import Any, AsyncGenerator, Tuple, List, Dict
 import datetime
 
 import aiofiles
@@ -36,14 +40,10 @@ DB_BATCH_SIZE = 10000
 
 def sanitize_identifier(raw: str, default: str = "custom_table") -> str:
     """Converts raw string or filename into a clean, safe Postgres SQL identifier."""
-    # Strip file extension if any
     name = Path(raw).stem
-    # Replace non-alphanumerics with underscores
     clean = re.sub(r"[^a-zA-Z0-9_]+", "_", name).strip("_").lower()
-    # Ensure doesn't start with a number or digit
     if not clean or clean[0].isdigit():
         clean = f"t_{clean}" if clean else default
-    # Postgres identifiers max 63 characters
     return clean[:63]
 
 
@@ -113,13 +113,24 @@ def cast_value_for_pg(val: Any, target_type: str) -> Any:
         elif target_type == "TIMESTAMP":
             if isinstance(val, (datetime.datetime, datetime.date)):
                 return val
-            # Try parsing ISO format
             s = str(val).strip().replace("Z", "")
             return datetime.datetime.fromisoformat(s)
         else:
             return str(val)
     except Exception:
         return str(val) if val is not None else None
+
+
+async def _auto_create_indexes(table_name: str, columns: list[str], pool: asyncpg.Pool):
+    """Creates indexes on primary keys or foreign key candidate columns (e.g. id, *_id, *_code)."""
+    async with pool.acquire() as conn:
+        for col in columns:
+            if col == "id" or col.endswith("_id") or col.endswith("_code") or col.endswith("_key"):
+                idx_name = f"idx_{table_name}_{col}"[:63]
+                try:
+                    await conn.execute(f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON "{table_name}" ("{col}");')
+                except Exception as exc:
+                    logger.debug("Index creation skipped for %s: %s", idx_name, exc)
 
 
 async def save_upload_to_disk(upload_file: UploadFile, dest_path: Path) -> int:
@@ -147,7 +158,6 @@ async def save_upload_to_disk(upload_file: UploadFile, dest_path: Path) -> int:
 
 async def ingest_csv(file_path: Path, table_name: str, pool: asyncpg.Pool) -> dict[str, Any]:
     """Parses and streams CSV/TSV data into PostgreSQL."""
-    # Detect delimiter and sample header
     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
         sample = f.read(64 * 1024)
         f.seek(0)
@@ -176,7 +186,6 @@ async def ingest_csv(file_path: Path, table_name: str, pool: asyncpg.Pool) -> di
                 unique_headers.append(h)
         headers = unique_headers
 
-        # Sample rows for type inference
         sample_rows = []
         for _ in range(500):
             try:
@@ -214,18 +223,16 @@ async def ingest_csv(file_path: Path, table_name: str, pool: asyncpg.Pool) -> di
         await conn.execute(f'DROP TABLE IF EXISTS "{table_name}" CASCADE;')
         await conn.execute(f'CREATE TABLE "{table_name}" ({cols_ddl});')
 
-    # Stream rows into Postgres in batches
     total_rows = 0
     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
         reader = csv.reader(f, delimiter=delimiter)
-        next(reader)  # Skip header
+        next(reader)
 
         batch = []
         async with pool.acquire() as conn:
             for row in reader:
                 if not row:
                     continue
-                # Pad or trim row to match headers
                 padded = row + [""] * (len(headers) - len(row))
                 converted_row = tuple(
                     cast_value_for_pg(padded[i], col_types[headers[i]])
@@ -241,6 +248,8 @@ async def ingest_csv(file_path: Path, table_name: str, pool: asyncpg.Pool) -> di
             if batch:
                 await conn.copy_records_to_table(table_name, records=batch, columns=headers)
                 total_rows += len(batch)
+
+    await _auto_create_indexes(table_name, headers, pool)
 
     return {
         "table_name": table_name,
@@ -315,6 +324,8 @@ async def ingest_parquet(file_path: Path, table_name: str, pool: asyncpg.Pool) -
             await conn.copy_records_to_table(table_name, records=records, columns=headers)
             total_rows += row_count
 
+    await _auto_create_indexes(table_name, headers, pool)
+
     return {
         "table_name": table_name,
         "rows_inserted": total_rows,
@@ -331,7 +342,6 @@ async def ingest_sql(file_path: Path, pool: asyncpg.Pool) -> dict[str, Any]:
         raise ValueError("SQL file is empty.")
 
     async with pool.acquire() as conn:
-        # Execute script statements
         await conn.execute(sql_content)
 
     return {
@@ -358,7 +368,6 @@ async def ingest_json(file_path: Path, table_name: str, pool: asyncpg.Pool) -> d
             if isinstance(data, list):
                 records = data
             elif isinstance(data, dict):
-                # Try finding first list in dictionary
                 list_val = next((v for v in data.values() if isinstance(v, list)), None)
                 records = list_val if list_val else [data]
             else:
@@ -367,7 +376,6 @@ async def ingest_json(file_path: Path, table_name: str, pool: asyncpg.Pool) -> d
     if not records:
         raise ValueError("No records found in JSON file.")
 
-    # Determine unique fields
     all_keys = set()
     for r in records[:500]:
         if isinstance(r, dict):
@@ -376,7 +384,6 @@ async def ingest_json(file_path: Path, table_name: str, pool: asyncpg.Pool) -> d
     headers = [sanitize_identifier(k) for k in all_keys]
     key_to_header = {k: sanitize_identifier(k) for k in all_keys}
 
-    # Infer types
     col_types = {}
     for k, h in key_to_header.items():
         observed = set(infer_pg_type_from_value(r.get(k)) for r in records[:500] if isinstance(r, dict) and r.get(k) is not None)
@@ -395,13 +402,11 @@ async def ingest_json(file_path: Path, table_name: str, pool: asyncpg.Pool) -> d
         else:
             col_types[h] = "TEXT"
 
-    # Create table
     cols_ddl = ", ".join([f'"{h}" {col_types[h]}' for h in headers])
     async with pool.acquire() as conn:
         await conn.execute(f'DROP TABLE IF EXISTS "{table_name}" CASCADE;')
         await conn.execute(f'CREATE TABLE "{table_name}" ({cols_ddl});')
 
-    # Insert rows
     batch = []
     total_rows = 0
     async with pool.acquire() as conn:
@@ -423,6 +428,8 @@ async def ingest_json(file_path: Path, table_name: str, pool: asyncpg.Pool) -> d
             await conn.copy_records_to_table(table_name, records=batch, columns=headers)
             total_rows += len(batch)
 
+    await _auto_create_indexes(table_name, headers, pool)
+
     return {
         "table_name": table_name,
         "rows_inserted": total_rows,
@@ -431,93 +438,112 @@ async def ingest_json(file_path: Path, table_name: str, pool: asyncpg.Pool) -> d
 
 
 async def ingest_excel(file_path: Path, table_name: str, pool: asyncpg.Pool) -> dict[str, Any]:
-    """Streams an Excel spreadsheet (.xlsx, .xls) into PostgreSQL."""
+    """
+    Streams an Excel spreadsheet (.xlsx, .xls) into PostgreSQL.
+    Supports single-sheet and multi-sheet workbooks as distinct relational tables.
+    """
     import openpyxl
 
-    wb = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
-    sheet = wb.active
+    wb = openpyxl.load_workbook(str(file_path), data_only=True)
+    sheet_names = wb.sheetnames
 
-    rows_iter = sheet.iter_rows(values_only=True)
-    try:
-        raw_headers = next(rows_iter)
-    except StopIteration:
-        raise ValueError("Excel sheet is empty.")
+    if not sheet_names:
+        wb.close()
+        raise ValueError("Excel file contains no sheets.")
 
-    headers = [sanitize_identifier(str(h) if h else f"col_{i+1}") for i, h in enumerate(raw_headers)]
-    
-    # Infer types from first rows
-    sample_rows = []
-    for _ in range(200):
+    created_tables = []
+    total_rows_all = 0
+    all_cols = []
+
+    for s_name in sheet_names:
+        sheet = wb[s_name]
+        # If single sheet, use table_name; if multiple sheets, name after sheet
+        cur_table = sanitize_identifier(s_name) if len(sheet_names) > 1 else table_name
+        
+        rows_iter = sheet.iter_rows(values_only=True)
         try:
-            r = next(rows_iter)
-            if any(cell is not None for cell in r):
-                sample_rows.append(r)
+            raw_headers = next(rows_iter)
         except StopIteration:
-            break
+            continue
 
-    col_types = {}
-    for i, col in enumerate(headers):
-        types_observed = set(infer_pg_type_from_value(r[i]) for r in sample_rows if i < len(r) and r[i] is not None)
-        if "TEXT" in types_observed or not types_observed:
-            col_types[col] = "TEXT"
-        elif "TIMESTAMP" in types_observed:
-            col_types[col] = "TIMESTAMP"
-        elif "DOUBLE PRECISION" in types_observed:
-            col_types[col] = "DOUBLE PRECISION"
-        elif "BIGINT" in types_observed:
-            col_types[col] = "BIGINT"
-        elif "INTEGER" in types_observed:
-            col_types[col] = "INTEGER"
-        elif "BOOLEAN" in types_observed:
-            col_types[col] = "BOOLEAN"
-        else:
-            col_types[col] = "TEXT"
+        headers = [sanitize_identifier(str(h) if h is not None else f"col_{i+1}") for i, h in enumerate(raw_headers)]
+        while headers and not headers[-1]:
+            headers.pop()
+        if not headers:
+            continue
 
-    # Create table
-    cols_ddl = ", ".join([f'"{col}" {col_types[col]}' for col in headers])
-    async with pool.acquire() as conn:
-        await conn.execute(f'DROP TABLE IF EXISTS "{table_name}" CASCADE;')
-        await conn.execute(f'CREATE TABLE "{table_name}" ({cols_ddl});')
+        sample_rows = []
+        for _ in range(200):
+            try:
+                r = next(rows_iter)
+                if any(cell is not None for cell in r):
+                    sample_rows.append(r)
+            except StopIteration:
+                break
 
-    # Stream remaining rows
-    wb.close()
-    wb = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
-    sheet = wb.active
-    rows_iter = sheet.iter_rows(values_only=True)
-    next(rows_iter)  # Skip header
+        col_types = {}
+        for i, col in enumerate(headers):
+            types_observed = set(infer_pg_type_from_value(r[i]) for r in sample_rows if i < len(r) and r[i] is not None)
+            if "TEXT" in types_observed or not types_observed:
+                col_types[col] = "TEXT"
+            elif "TIMESTAMP" in types_observed:
+                col_types[col] = "TIMESTAMP"
+            elif "DOUBLE PRECISION" in types_observed:
+                col_types[col] = "DOUBLE PRECISION"
+            elif "BIGINT" in types_observed:
+                col_types[col] = "BIGINT"
+            elif "INTEGER" in types_observed:
+                col_types[col] = "INTEGER"
+            elif "BOOLEAN" in types_observed:
+                col_types[col] = "BOOLEAN"
+            else:
+                col_types[col] = "TEXT"
 
-    batch = []
-    total_rows = 0
-    async with pool.acquire() as conn:
-        for row in rows_iter:
-            if not any(c is not None for c in row):
-                continue
-            padded = list(row) + [None] * (len(headers) - len(row))
-            row_tuple = tuple(
-                cast_value_for_pg(padded[i], col_types[headers[i]])
-                for i in range(len(headers))
-            )
-            batch.append(row_tuple)
+        cols_ddl = ", ".join([f'"{col}" {col_types[col]}' for col in headers])
+        async with pool.acquire() as conn:
+            await conn.execute(f'DROP TABLE IF EXISTS "{cur_table}" CASCADE;')
+            await conn.execute(f'CREATE TABLE "{cur_table}" ({cols_ddl});')
 
-            if len(batch) >= DB_BATCH_SIZE:
-                await conn.copy_records_to_table(table_name, records=batch, columns=headers)
-                total_rows += len(batch)
-                batch = []
+        rows_iter = sheet.iter_rows(values_only=True)
+        next(rows_iter)
 
-        if batch:
-            await conn.copy_records_to_table(table_name, records=batch, columns=headers)
-            total_rows += len(batch)
+        batch = []
+        sheet_rows = 0
+        async with pool.acquire() as conn:
+            for row in rows_iter:
+                if not any(c is not None for c in row):
+                    continue
+                padded = list(row) + [None] * (len(headers) - len(row))
+                row_tuple = tuple(
+                    cast_value_for_pg(padded[i], col_types[headers[i]])
+                    for i in range(len(headers))
+                )
+                batch.append(row_tuple)
+
+                if len(batch) >= DB_BATCH_SIZE:
+                    await conn.copy_records_to_table(cur_table, records=batch, columns=headers)
+                    sheet_rows += len(batch)
+                    batch = []
+
+            if batch:
+                await conn.copy_records_to_table(cur_table, records=batch, columns=headers)
+                sheet_rows += len(batch)
+
+        await _auto_create_indexes(cur_table, headers, pool)
+        created_tables.append(cur_table)
+        total_rows_all += sheet_rows
+        all_cols.extend([{"name": col, "type": col_types[col]} for col in headers])
 
     wb.close()
     return {
-        "table_name": table_name,
-        "rows_inserted": total_rows,
-        "columns": [{"name": col, "type": col_types[col]} for col in headers]
+        "table_name": ", ".join(created_tables),
+        "rows_inserted": total_rows_all,
+        "columns": all_cols
     }
 
 
 async def ingest_sqlite(file_path: Path, pool: asyncpg.Pool) -> dict[str, Any]:
-    """Reads tables from an SQLite database and transfers them to PostgreSQL."""
+    """Reads all user tables from an SQLite database and transfers them to PostgreSQL."""
     conn_sq = sqlite3.connect(str(file_path))
     cursor = conn_sq.cursor()
 
@@ -540,7 +566,7 @@ async def ingest_sqlite(file_path: Path, pool: asyncpg.Pool) -> dict[str, Any]:
         col_types = {}
         for col in col_info:
             c_name = sanitize_identifier(col[1])
-            sq_type = col[2].upper()
+            sq_type = str(col[2]).upper()
             if "INT" in sq_type:
                 col_types[c_name] = "BIGINT"
             elif "REAL" in sq_type or "FLOA" in sq_type or "DOUB" in sq_type:
@@ -555,9 +581,7 @@ async def ingest_sqlite(file_path: Path, pool: asyncpg.Pool) -> dict[str, Any]:
             await conn.execute(f'DROP TABLE IF EXISTS "{pg_table}" CASCADE;')
             await conn.execute(f'CREATE TABLE "{pg_table}" ({cols_ddl});')
 
-        # Stream rows
         cursor.execute(f"SELECT * FROM '{sq_table}'")
-        batch = []
         table_rows = 0
         async with pool.acquire() as conn:
             while True:
@@ -571,6 +595,7 @@ async def ingest_sqlite(file_path: Path, pool: asyncpg.Pool) -> dict[str, Any]:
                 await conn.copy_records_to_table(pg_table, records=records, columns=headers)
                 table_rows += len(records)
 
+        await _auto_create_indexes(pg_table, headers, pool)
         created_tables.append(pg_table)
         total_rows += table_rows
 
@@ -580,6 +605,41 @@ async def ingest_sqlite(file_path: Path, pool: asyncpg.Pool) -> dict[str, Any]:
         "rows_inserted": total_rows,
         "columns": []
     }
+
+
+async def ingest_zip(file_path: Path, pool: asyncpg.Pool) -> dict[str, Any]:
+    """Unzips an archive containing CSVs, Parquets, JSONs, or SQL scripts and ingests all tables."""
+    extract_dir = Path(tempfile.mkdtemp(prefix="querity_zip_"))
+    try:
+        with zipfile.ZipFile(str(file_path), "r") as zip_ref:
+            zip_ref.extractall(str(extract_dir))
+
+        created_tables = []
+        total_rows = 0
+
+        for sub_path in extract_dir.rglob("*"):
+            if sub_path.is_file() and not sub_path.name.startswith((".", "__")):
+                sub_ext = sub_path.suffix.lower()
+                if sub_ext in (".csv", ".tsv", ".parquet", ".sql", ".json", ".jsonl", ".xlsx", ".sqlite", ".db"):
+                    res = await process_file_ingestion(
+                        file_path=sub_path,
+                        original_filename=sub_path.name,
+                        custom_table_name=None,
+                        pool=pool
+                    )
+                    created_tables.append(res["table_name"])
+                    total_rows += res.get("rows_inserted", 0)
+
+        if not created_tables:
+            raise ValueError("No supported data files (.csv, .parquet, .json, .xlsx, .sqlite, .sql) found inside ZIP archive.")
+
+        return {
+            "table_name": ", ".join(created_tables),
+            "rows_inserted": total_rows,
+            "columns": []
+        }
+    finally:
+        shutil.rmtree(extract_dir, ignore_errors=True)
 
 
 # -----------------------------------------------------------------------------
@@ -610,8 +670,10 @@ async def process_file_ingestion(
         result = await ingest_excel(file_path, table_name, pool)
     elif ext in (".sqlite", ".sqlite3", ".db"):
         result = await ingest_sqlite(file_path, pool)
+    elif ext == ".zip":
+        result = await ingest_zip(file_path, pool)
     else:
-        raise ValueError(f"Unsupported file format '{ext}'. Supported: CSV, Parquet, SQL, JSON, Excel, SQLite.")
+        raise ValueError(f"Unsupported file format '{ext}'. Supported: CSV, Parquet, SQL, JSON, Excel, SQLite, ZIP.")
 
     logger.info("Ingestion completed: %s", result)
     return result

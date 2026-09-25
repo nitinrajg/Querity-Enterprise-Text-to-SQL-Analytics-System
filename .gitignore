@@ -38,10 +38,3 @@ wheels/
 Thumbs.db
 .vscode/
 .idea/
-
-# Vercel
-.vercel/
-
-# Temp upload directory (local dev)
-backend/temp_uploads/
-temp_uploads/

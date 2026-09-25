@@ -43,9 +43,7 @@ DATABASE_URL = os.environ.get(
 )
 MAX_ROWS = 100
 QUERY_TIMEOUT_MS = 5000
-# On Vercel (serverless), /tmp is the only writable directory.
-# The TEMP_UPLOAD_DIR env var is set to /tmp/querity_uploads in api/index.py.
-TEMP_UPLOAD_DIR = Path(os.environ.get("TEMP_UPLOAD_DIR", "./temp_uploads"))
+TEMP_UPLOAD_DIR = Path("./temp_uploads")
 
 
 # ---------------------------------------------------------------------------
@@ -86,22 +84,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Allowed origins: local dev servers + any Vercel deployment (*.vercel.app)
-_CORS_ORIGINS = [
-    "http://localhost:5500",
-    "http://127.0.0.1:5500",
-    "http://localhost:3000",
-]
-# Allow all *.vercel.app subdomains for preview deployments
-_CORS_ORIGIN_REGEX = r"https://.*\.vercel\.app"
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_CORS_ORIGINS,
-    allow_origin_regex=_CORS_ORIGIN_REGEX,
+    allow_origins=["http://localhost:5500", "http://127.0.0.1:5500", "http://localhost:3000"],
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
-    allow_credentials=False,
 )
 
 

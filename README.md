@@ -1,4 +1,4 @@
-# ⚡ Queryable — Enterprise Text-to-SQL & Analytical Agent
+# ⚡ Querity — Enterprise Text-to-SQL & Analytical Agent
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115.0+-009688.svg?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![Google Gemini](https://img.shields.io/badge/Google%20Gemini-2.5%20Flash-4285F4.svg?style=flat&logo=google&logoColor=white)](https://ai.google.dev)
@@ -10,7 +10,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%20|%203.11%20|%203.12-3776AB.svg?style=flat&logo=python&logoColor=white)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg?style=flat)](LICENSE)
 
-> **Queryable** is a production-grade, enterprise-ready Natural Language to SQL (Text-to-SQL) autonomous agent and analytical playground. It translates plain-English business queries into deterministic, read-only SQL across **Multi-LLM providers (Google Gemini, NVIDIA NIM, Groq, and Grok)**, enforces a zero-trust defense-in-depth safety engine, executes queries against live **PostgreSQL (local or Neon DB)**, and integrates an embedded **in-memory DuckDB OLAP engine** backed by a **50GB multi-format streaming ingestion pipeline**.
+> **Querity** is a production-grade, enterprise-ready Natural Language to SQL (Text-to-SQL) autonomous agent and analytical playground. It translates plain-English business queries into deterministic, read-only SQL across **Multi-LLM providers (Google Gemini, NVIDIA NIM, Groq, and Grok)**, enforces a zero-trust defense-in-depth safety engine, executes queries against live **PostgreSQL (local or Neon DB)**, and integrates an embedded **in-memory DuckDB OLAP engine** backed by a **50GB multi-format streaming ingestion pipeline**.
 
 ---
 
@@ -137,7 +137,7 @@ flowchart TD
 ```mermaid
 graph LR
     subgraph Client Layer
-        WebUI[Queryable Web Console]
+        WebUI[Querity Web Console]
         PlaygroundUI[DuckDB SQL Playground]
     end
 
@@ -597,7 +597,7 @@ Even before touching database permissions, all generated queries pass through `v
 
 ## 🔒 Security & Sandbox Model
 
-Queryable adheres to strict security standards to ensure user safety when executing AI-generated code:
+Querity adheres to strict security standards to ensure user safety when executing AI-generated code:
 
 ```
 [ Natural Language Prompt ]
@@ -661,5 +661,5 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 ---
 
 <p align="center">
-  <b>Queryable</b> — Designed &amp; Engineered for High-Performance Text-to-SQL Analytics.
+  <b>Querity</b> — Designed &amp; Engineered for High-Performance Text-to-SQL Analytics.
 </p>

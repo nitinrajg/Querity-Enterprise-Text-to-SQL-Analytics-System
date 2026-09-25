@@ -3,12 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>DuckDB SQL Playground — Queryable</title>
+<title>DuckDB SQL Playground — Querity</title>
 <meta name="description" content="High-performance DuckDB analytical SQL playground. Run sub-millisecond queries, window functions, and analytics directly on your datasets.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=11">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css?v=13">
 <style>
 button, input, select, textarea {
   font-family: inherit;
@@ -65,28 +65,30 @@ button, input, select, textarea {
 .engine-pill {
   font-family: var(--font-mono);
   font-size: 10px;
-  background: rgba(210, 153, 34, 0.15);
+  font-weight: 700;
+  background: rgba(255, 208, 0, 0.15);
   color: var(--warning);
-  border: 1px solid rgba(210, 153, 34, 0.3);
-  padding: 2px 6px;
-  border-radius: 10px;
+  border: 1px solid rgba(255, 208, 0, 0.35);
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
 }
 
 .tables-search-input {
   width: 100%;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-full);
   color: var(--text);
   font-family: var(--font-ui);
   font-size: 12px;
-  padding: 6px 10px;
+  padding: 8px 14px;
   outline: none;
-  transition: border-color 0.15s ease;
+  transition: all 0.2s var(--ease-spring);
 }
 
 .tables-search-input:focus {
   border-color: var(--accent-blue);
+  box-shadow: 0 0 16px var(--accent-blue-glow);
 }
 
 .sidebar-tables-list {
@@ -150,19 +152,21 @@ button, input, select, textarea {
 .mini-action-btn {
   font-family: var(--font-mono);
   font-size: 10px;
+  font-weight: 600;
   background: var(--panel);
   border: 1px solid var(--border);
   color: var(--text-muted);
-  border-radius: var(--radius-sm);
-  padding: 2px 6px;
+  border-radius: var(--radius-full);
+  padding: 3px 8px;
   cursor: pointer;
-  transition: all 0.1s ease;
+  transition: all 0.2s var(--ease-spring);
 }
 
 .mini-action-btn:hover {
   color: var(--text);
   border-color: var(--accent);
   background: var(--panel-subtle);
+  transform: translateY(-1px);
 }
 
 .duck-columns-list {
@@ -179,22 +183,23 @@ button, input, select, textarea {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-muted);
-  padding: 2px 4px;
-  border-radius: 3px;
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
   cursor: pointer;
+  transition: all 0.15s ease;
 }
 
 .duck-column-item:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(0, 240, 255, 0.08);
   color: var(--text);
 }
 
 .duck-col-type {
-  font-size: 9px;
+  font-size: 9.5px;
   color: var(--text-dim);
-  background: rgba(0, 0, 0, 0.2);
-  padding: 1px 4px;
-  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
 }
 
 /* Main Workspace */
@@ -224,24 +229,29 @@ button, input, select, textarea {
   border-radius: var(--radius-full);
   cursor: pointer;
   white-space: nowrap;
-  transition: all 0.15s ease;
+  transition: transform 0.25s var(--ease-spring), box-shadow 0.25s var(--ease-spring), background 0.2s ease, border-color 0.2s ease;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
 }
 
 .template-chip:hover {
   color: #fff;
   border-color: var(--warning);
-  background: rgba(210, 153, 34, 0.1);
+  background: rgba(255, 208, 0, 0.14);
+  transform: translateY(-2px) scale(1.02);
+  box-shadow: 0 0 16px var(--warning-glow);
 }
 
+.template-chip:active { transform: translateY(1px) scale(0.97); }
+
 .template-chip .chip-tag {
-  font-size: 9px;
-  background: rgba(210, 153, 34, 0.25);
+  font-size: 9.5px;
+  font-weight: 700;
+  background: rgba(255, 208, 0, 0.25);
   color: var(--warning);
-  padding: 1px 4px;
-  border-radius: 4px;
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
 }
 
 /* Editor Panel */
@@ -250,7 +260,7 @@ button, input, select, textarea {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   overflow: hidden;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
 }
 
 .editor-card-header {
@@ -276,7 +286,7 @@ button, input, select, textarea {
   height: 8px;
   border-radius: 50%;
   background: var(--warning);
-  box-shadow: 0 0 8px rgba(210, 153, 34, 0.6);
+  box-shadow: 0 0 10px var(--warning-glow);
 }
 
 .editor-card-header-right {
@@ -288,41 +298,49 @@ button, input, select, textarea {
 .btn-editor-tool {
   font-family: var(--font-ui);
   font-size: 12px;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%);
+  font-weight: 500;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.02) 100%);
   color: var(--text-muted);
   border: 1px solid var(--border);
   border-radius: var(--radius-full);
   padding: 5px 14px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: transform 0.22s var(--ease-spring), border-color 0.15s ease, color 0.15s ease;
 }
 
 .btn-editor-tool:hover {
   color: var(--text);
   border-color: var(--accent-blue);
-  background: linear-gradient(135deg, rgba(88, 166, 255, 0.12) 0%, rgba(88, 166, 255, 0.04) 100%);
+  background: linear-gradient(135deg, rgba(0, 240, 255, 0.14) 0%, rgba(0, 240, 255, 0.04) 100%);
+  transform: translateY(-1px);
 }
+
+.btn-editor-tool:active { transform: translateY(1px); }
 
 .btn-run-duckdb {
   font-family: var(--font-ui);
-  font-size: 13px;
-  font-weight: 600;
-  background: linear-gradient(135deg, #d29922, #f85149);
-  color: #fff;
+  font-size: 13.5px;
+  font-weight: 700;
+  background: linear-gradient(135deg, #FFD000, #FF3366);
+  color: #040805;
   border: none;
   border-radius: var(--radius-full);
-  padding: 7px 20px;
+  padding: 8px 22px;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 6px;
-  box-shadow: 0 2px 12px rgba(210, 153, 34, 0.35);
-  transition: all 0.15s ease;
+  box-shadow: 0 0 20px var(--warning-glow);
+  transition: transform 0.28s var(--ease-spring), box-shadow 0.28s var(--ease-spring);
 }
 
 .btn-run-duckdb:hover:not(:disabled) {
-  box-shadow: 0 4px 18px rgba(210, 153, 34, 0.55);
-  transform: translateY(-1px);
+  box-shadow: 0 0 28px var(--warning-glow), 0 4px 16px rgba(0, 0, 0, 0.4);
+  transform: translateY(-2px) scale(1.02);
+}
+
+.btn-run-duckdb:active:not(:disabled) {
+  transform: translateY(1px) scale(0.96);
 }
 
 .btn-run-duckdb:disabled {
@@ -333,9 +351,11 @@ button, input, select, textarea {
 .btn-run-duckdb .shortcut-badge {
   font-family: var(--font-mono);
   font-size: 10px;
-  background: rgba(0, 0, 0, 0.25);
-  padding: 1px 5px;
-  border-radius: 3px;
+  font-weight: 800;
+  background: rgba(0, 0, 0, 0.28);
+  color: #040805;
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
   margin-left: 4px;
 }
 
@@ -390,8 +410,8 @@ button, input, select, textarea {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 7px 10px;
-  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  border-radius: var(--radius-full);
   cursor: pointer;
   font-family: var(--font-mono);
   font-size: 12.5px;
@@ -402,7 +422,7 @@ button, input, select, textarea {
 
 .autocomplete-item:hover,
 .autocomplete-item.selected {
-  background: rgba(88, 166, 255, 0.15);
+  background: rgba(0, 240, 255, 0.15);
   color: #fff;
 }
 
@@ -418,8 +438,8 @@ button, input, select, textarea {
 .item-badge {
   font-size: 9px;
   font-weight: 700;
-  padding: 2px 5px;
-  border-radius: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   line-height: 1;
@@ -427,21 +447,21 @@ button, input, select, textarea {
 }
 
 .item-badge.badge-clause {
-  background: rgba(210, 153, 34, 0.2);
-  color: #d29922;
-  border: 1px solid rgba(210, 153, 34, 0.4);
+  background: rgba(255, 208, 0, 0.2);
+  color: var(--warning);
+  border: 1px solid rgba(255, 208, 0, 0.4);
 }
 
 .item-badge.badge-table {
-  background: rgba(88, 166, 255, 0.2);
-  color: #58a6ff;
-  border: 1px solid rgba(88, 166, 255, 0.4);
+  background: rgba(0, 240, 255, 0.2);
+  color: var(--accent-blue);
+  border: 1px solid rgba(0, 240, 255, 0.4);
 }
 
 .item-badge.badge-column {
-  background: rgba(63, 185, 80, 0.2);
-  color: #3fb950;
-  border: 1px solid rgba(63, 185, 80, 0.4);
+  background: rgba(0, 255, 102, 0.2);
+  color: var(--accent);
+  border: 1px solid rgba(0, 255, 102, 0.4);
 }
 
 .item-badge.badge-function {
@@ -684,7 +704,7 @@ button, input, select, textarea {
   <div class="brand">
     <a href="index.html" style="display:flex;align-items:center;gap:10px;text-decoration:none;color:inherit;">
       <span class="brand-mark">▸_</span>
-      <span class="brand-name">Queryable</span>
+      <span class="brand-name">Querity</span>
     </a>
     <span class="brand-badge" style="background:rgba(210,153,34,0.18);color:var(--warning);border-color:rgba(210,153,34,0.35);">⚡ DuckDB Engine</span>
   </div>
@@ -715,25 +735,26 @@ button, input, select, textarea {
       <button class="close-icon-btn" id="uploadCloseBtn" aria-label="Close modal" title="Close (Esc)">✕</button>
     </div>
 
-    <div class="format-badges">
-      <span class="format-pill">CSV / TSV</span>
-      <span class="format-pill highlight">Parquet</span>
-      <span class="format-pill">SQL Dump</span>
-      <span class="format-pill">JSON / JSONL</span>
-      <span class="format-pill">Excel (.xlsx)</span>
-      <span class="format-pill">SQLite (.db)</span>
+    <div class="format-badges" id="formatBadges">
+      <span class="format-pill" data-format="csv">CSV / TSV</span>
+      <span class="format-pill" data-format="parquet">Parquet</span>
+      <span class="format-pill" data-format="sql">SQL Dump</span>
+      <span class="format-pill" data-format="json">JSON / JSONL</span>
+      <span class="format-pill" data-format="xlsx">Excel (.xlsx)</span>
+      <span class="format-pill" data-format="sqlite">SQLite (.db)</span>
+      <span class="format-pill" data-format="zip">ZIP (.zip)</span>
     </div>
 
     <form id="uploadForm" class="upload-form">
       <div class="dropzone" id="dropzone">
-        <input type="file" id="fileInput" name="file" class="file-input" accept=".csv,.tsv,.txt,.parquet,.sql,.json,.jsonl,.ndjson,.xlsx,.xls,.sqlite,.sqlite3,.db" required>
+        <input type="file" id="fileInput" name="files" class="file-input" accept=".csv,.tsv,.txt,.parquet,.sql,.json,.jsonl,.ndjson,.xlsx,.xls,.sqlite,.sqlite3,.db,.zip" multiple required>
         <div class="dropzone-content">
           <div class="dropzone-icon">⇪</div>
-          <p class="dropzone-main-text">Drag &amp; drop your dataset here, or <span class="browse-link">browse</span></p>
-          <p class="dropzone-sub-text">Supported: .parquet, .csv, .sql, .json, .xlsx, .sqlite (up to 50GB)</p>
+          <p class="dropzone-main-text">Drag &amp; drop single or multiple database files here, or <span class="browse-link">browse</span></p>
+          <p class="dropzone-sub-text">Upload single or multiple .csv, .parquet, .xlsx, .json, .sqlite, .zip (up to 50GB)</p>
           <div class="selected-file-info" id="selectedFileInfo" hidden>
-            <span class="file-icon">📄</span>
-            <span class="file-name" id="selectedFileName">dataset.parquet</span>
+            <span class="file-icon" id="selectedFileIcon">📄</span>
+            <span class="file-name" id="selectedFileName">dataset.csv</span>
             <span class="file-size" id="selectedFileSize">(0 MB)</span>
           </div>
         </div>
@@ -896,6 +917,6 @@ button, input, select, textarea {
   <p>DuckDB SQL Playground · In-memory vectorized OLAP execution · Supports PostgreSQL table sync &amp; multi-format data</p>
 </footer>
 
-<script src="playground.js?v=3"></script>
+<script src="playground.js?v=4"></script>
 </body>
 </html>
