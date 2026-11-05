@@ -1,0 +1,53 @@
+{
+  "provider": {
+    "provider_id": "google",
+    "provider_name": "Google Gemini",
+    "model_name": "gemini-3.5-flash-lite",
+    "base_url": "https://generativelanguage.googleapis.com",
+    "has_valid_key": true
+  },
+  "total_questions": 45,
+  "llm_calls_made": 45,
+  "execution_accuracy_pct": 82.22,
+  "correct_count": 37,
+  "valid_sql_rate_pct": 100.0,
+  "guard_blocked_pct": 0.0,
+  "api_error_count": 0,
+  "category_accuracy": {
+    "aggregation_group_by": {
+      "total": 9,
+      "correct": 8,
+      "accuracy": 88.88888888888889
+    },
+    "ambiguous_wording": {
+      "total": 3,
+      "correct": 0,
+      "accuracy": 0.0
+    },
+    "join": {
+      "total": 9,
+      "correct": 9,
+      "accuracy": 100.0
+    },
+    "single_table_filter": {
+      "total": 9,
+      "correct": 9,
+      "accuracy": 100.0
+    },
+    "subquery_cte": {
+      "total": 8,
+      "correct": 5,
+      "accuracy": 62.5
+    },
+    "window_function": {
+      "total": 7,
+      "correct": 6,
+      "accuracy": 85.71428571428571
+    }
+  },
+  "failure_breakdown": {
+    "wrong_result_valid_sql": 7,
+    "wrong_aggregation_or_filter": 1
+  },
+  "timestamp": "2026-11-05T17:31:39.327329+00:00"
+}

@@ -13,16 +13,26 @@ Endpoints:
 """
 
 import os
+import sys
 import time
 import shutil
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 
+# Ensure backend directory is in sys.path regardless of execution working directory
+_backend_dir = Path(__file__).resolve().parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
+
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
-load_dotenv()
+_env_path = _backend_dir / ".env"
+if _env_path.exists():
+    load_dotenv(dotenv_path=_env_path, override=True)
+else:
+    load_dotenv(override=True)
 
 import asyncpg
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, status
@@ -86,9 +96,9 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5500", "http://127.0.0.1:5500", "http://localhost:3000"],
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 

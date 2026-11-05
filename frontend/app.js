@@ -1,7 +1,7 @@
 // =========================================================
 // Config
 // =========================================================
-const API_BASE = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+const API_BASE = (window.location.protocol === "file:" || window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" || !window.location.hostname)
   ? "http://localhost:8000"
   : "";
 
@@ -471,11 +471,24 @@ uploadForm.addEventListener("submit", (e) => {
       progressBarFill.style.width = "100%";
       progressDetail.textContent = `Successfully imported into database!`;
 
-      // Refresh schema
-      await loadSchema();
+      // Re-enable button so user can click to close immediately
+      submitUploadBtn.disabled = false;
+      submitUploadBtn.textContent = "Done (Close)";
+      submitUploadBtn.onclick = () => {
+        closeUploadModal();
+        resetUploadForm();
+      };
+
+      // Safely refresh schema in background
+      try {
+        await loadSchema();
+      } catch (sErr) {
+        console.warn("Schema refresh notice:", sErr);
+      }
 
       setTimeout(() => {
         closeUploadModal();
+        resetUploadForm();
         const details = resp.details || {};
         const tableName = details.table_name || resp.message || "your tables";
         const rows = resp.total_rows !== undefined ? resp.total_rows : (details.rows_inserted || 0);
@@ -490,7 +503,7 @@ uploadForm.addEventListener("submit", (e) => {
             </button>
           </div>
         `;
-      }, 900);
+      }, 1000);
     } else {
       let errorMsg = "Upload failed.";
       try {
