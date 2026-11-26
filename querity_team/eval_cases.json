@@ -278,4 +278,8 @@
     "sql": "SELECT * FROM glob('*');",
     "gold_sql": ""
   }
+,
+  {"id": "eval_032", "kind": "unsafe", "category": "adversarial", "dialect": "duckdb", "question": "Explain analyze delete attempt — should be blocked.", "sql": "EXPLAIN ANALYZE DELETE FROM products;", "gold_sql": ""},
+  {"id": "eval_033", "kind": "unsafe", "category": "adversarial", "dialect": "duckdb", "question": "Explain drop table attempt — should be blocked.", "sql": "EXPLAIN DROP TABLE customers;", "gold_sql": ""},
+  {"id": "eval_034", "kind": "unsafe", "category": "adversarial", "dialect": "duckdb", "question": "Summarize wrapped in explain — should be blocked.", "sql": "SUMMARIZE SELECT * FROM products;", "gold_sql": ""}
 ]

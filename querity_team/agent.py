@@ -87,43 +87,62 @@ checker_agent = Agent(
 def checker_router(node_input: Any) -> Event:
     """Route Checker LLM verdict: PASS -> lead_hitl, FAIL (round < 2) -> retry, FAIL (round >= 2) -> lead_hitl.
 
-    Defaults to FAIL on unparseable output so malformed Checker responses never auto-PASS.
+    The authoritative retry counter is read from ``node_input["round_number"]`` which is
+    written into workflow state by ``deterministic_gate_node`` via ``stateDelta``.  This
+    means a Checker that returns malformed JSON (or omits ``round_number``) cannot reset
+    the counter to 0 and loop forever — the last known state value is used instead, and
+    the FAIL-closed default applies if the counter has already reached 2.
     """
     raw = node_input
-    round_num = 0
+
+    # --- 1. Extract the authoritative round count from upstream state (DetGate stateDelta). ---
+    # ``node_input`` is the dict passed through workflow state; ``round_number`` was set by
+    # ``deterministic_gate_node`` before this router was invoked.  Any value from the model
+    # reply is ignored for the purpose of enforcing the cap.
+    state_round: int = 0
+    if isinstance(raw, dict):
+        state_round = int(raw.get("round_number", 0))
+
+    # --- 2. Parse the Checker model reply (which may live in raw["checker_output"] or be raw itself). ---
+    checker_output: Any = raw.get("checker_output", raw) if isinstance(raw, dict) else raw
+
     verdict_dict: dict[str, Any] = {
         "status": "FAIL",
         "score": 0,
         "target_agent": "engineer",
         "numbered_fixes": ["Checker output was unparseable JSON; re-verify diff and EvalReport."],
-        "round_number": 0,
+        "round_number": state_round,
         "reason": "Unparseable Checker verdict (fail-closed default).",
     }
 
-    if isinstance(raw, dict):
-        round_num = int(raw.get("round_number", 0))
-        if "status" in raw:
-            verdict_dict = raw
-    elif isinstance(raw, str):
+    if isinstance(checker_output, dict) and "status" in checker_output:
+        verdict_dict = {**checker_output, "round_number": state_round}  # always use state round
+    elif isinstance(checker_output, str):
         try:
-            cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            cleaned = checker_output.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
             parsed = json.loads(cleaned)
             if isinstance(parsed, dict) and "status" in parsed:
-                verdict_dict = parsed
-                round_num = int(parsed.get("round_number", round_num))
+                verdict_dict = {**parsed, "round_number": state_round}  # always use state round
         except Exception:
-            pass
+            pass  # verdict_dict stays at fail-closed default with state_round
 
+    # --- 3. Route using the AUTHORITATIVE state_round (never the model's self-reported value). ---
     status = str(verdict_dict.get("status", "PASS")).upper()
     target = str(verdict_dict.get("target_agent", "engineer")).lower()
 
-    if status == "FAIL" and round_num < 2:
+    if status == "FAIL" and state_round < 2:
         route = "retry_analyst" if target == "analyst" else "retry_engineer"
-        verdict_dict["round_number"] = round_num + 1
+        next_round = state_round + 1
     else:
         route = "lead_hitl"
+        next_round = state_round
 
-    return Event(author="checker_router", output=verdict_dict, actions=EventActions(route=route))
+    verdict_dict["round_number"] = next_round
+    return Event(
+        author="checker_router",
+        output=verdict_dict,
+        actions=EventActions(route=route, state_delta={"round_number": next_round}),
+    )
 
 
 lead_agent = Agent(

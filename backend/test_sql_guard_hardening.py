@@ -60,3 +60,34 @@ def test_playground_meta_allows_single_show_but_blocks_stacked_and_pragma():
 def test_duckdb_external_access_disabled():
     with pytest.raises(Exception):
         execute_duckdb_sql("SELECT content FROM read_text('.env')")
+
+
+# --- EXPLAIN / EXPLAIN ANALYZE regression tests (Fix 1) ---
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "EXPLAIN ANALYZE DELETE FROM products;",
+        "EXPLAIN ANALYZE DROP TABLE customers;",
+        "EXPLAIN DELETE FROM products;",
+        "EXPLAIN DROP TABLE customers;",
+        "EXPLAIN INSERT INTO products VALUES (99,'x','y',1,1);",
+        "SUMMARIZE SELECT * FROM products;",
+    ],
+)
+def test_explain_analyze_always_blocked(sql: str):
+    """EXPLAIN ANALYZE executes the wrapped DML in DuckDB — must always be rejected."""
+    with pytest.raises(SQLSafetyError):
+        validate_sql_safety(sql, allow_meta=True)
+
+
+def test_show_tables_still_allowed():
+    """SHOW TABLES must remain valid after the EXPLAIN lockdown."""
+    result = validate_sql_safety("SHOW TABLES;", allow_meta=True)
+    assert result.upper().startswith("SHOW")
+
+
+def test_describe_still_allowed():
+    """DESCRIBE must remain valid after the EXPLAIN lockdown."""
+    result = validate_sql_safety("DESCRIBE products;", allow_meta=True)
+    assert result.upper().startswith("DESCRIBE")

@@ -128,6 +128,60 @@ def test_write_repo_file_blocks_protected_exam_paths():
         write_repo_file("querity_team/deterministic_nodes.py", "# hacked")
 
 
+def test_write_repo_file_blocks_path_traversal():
+    """Dot-segment and double-dot traversal must be defeated by resolved-path comparison."""
+    # Same file reached via ./
+    with pytest.raises(ValueError, match="protected"):
+        write_repo_file("querity_team/./baseline_metrics.json", "{}")
+    # Same file reached via ../querity_team/
+    with pytest.raises(ValueError, match="protected"):
+        write_repo_file("querity_team/../querity_team/baseline_metrics.json", "{}")
+    # agent.py via double-dot
+    with pytest.raises(ValueError, match="protected"):
+        write_repo_file("querity_team/./agent.py", "# hacked")
+
+
+def test_checker_router_state_round_enforced():
+    """checker_router must use the state round_number, not the model's self-reported value.
+
+    When bad JSON arrives but state says round >= 2, we must escalate to lead_hitl
+    (not loop back to retry_engineer).
+    """
+    from querity_team.agent import checker_router
+
+    # Simulate: state says round=2 (maximum), but checker returned garbage
+    bad_input = {"round_number": 2, "checker_output": "not json at all"}
+    event = checker_router(bad_input)
+    assert event.actions.route == "lead_hitl", (
+        f"Expected lead_hitl escalation at round 2, got {event.actions.route}"
+    )
+
+    # Simulate: state says round=0, checker returned valid FAIL -> should retry
+    fail_input = {
+        "round_number": 0,
+        "checker_output": '{"status": "FAIL", "score": 3, "target_agent": "engineer",'
+        ' "numbered_fixes": ["fix this"], "reason": "too slow"}',
+    }
+    event2 = checker_router(fail_input)
+    assert event2.actions.route in ("retry_engineer", "retry_analyst"), (
+        f"Expected retry at round 0, got {event2.actions.route}"
+    )
+    assert event2.actions.state_delta["round_number"] == 1, "state_delta must increment round"
+
+    # Simulate: state says round=1, checker returns FAIL -> should retry (round becomes 2)
+    fail_input2 = {**fail_input, "round_number": 1}
+    event3 = checker_router(fail_input2)
+    assert event3.actions.route in ("retry_engineer", "retry_analyst")
+    assert event3.actions.state_delta["round_number"] == 2
+
+    # Simulate: state says round=2, checker returns FAIL -> must escalate
+    fail_input3 = {**fail_input, "round_number": 2}
+    event4 = checker_router(fail_input3)
+    assert event4.actions.route == "lead_hitl", (
+        f"Expected lead_hitl at round cap, got {event4.actions.route}"
+    )
+
+
 def test_det_gate_catches_shrunk_eval_cases(tmp_path: Path):
     baseline_file = tmp_path / "baseline.json"
     baseline_file.write_text(

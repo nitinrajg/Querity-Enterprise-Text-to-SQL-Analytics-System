@@ -397,29 +397,49 @@ def read_repo_file(relative_path: str) -> str:
     return target.read_text(encoding="utf-8")
 
 
-_PROTECTED_AGENT_PATHS = {
-    "querity_team/baseline_metrics.json",
-    "querity_team/deterministic_nodes.py",
-    "querity_team/agent.py",
-    "querity_team/schemas.py",
-    "querity_team/seed_baseline.py",
+# Protected paths stored as resolved absolute Path objects to defeat traversal attacks
+# such as "querity_team/./baseline_metrics.json" or "querity_team/../querity_team/baseline_metrics.json".
+_PROTECTED_AGENT_PATHS: set[Path] = {
+    (REPO_ROOT / "querity_team" / "baseline_metrics.json").resolve(),
+    (REPO_ROOT / "querity_team" / "deterministic_nodes.py").resolve(),
+    (REPO_ROOT / "querity_team" / "agent.py").resolve(),
+    (REPO_ROOT / "querity_team" / "schemas.py").resolve(),
+    (REPO_ROOT / "querity_team" / "seed_baseline.py").resolve(),
 }
+
+_PROTECTED_PREFIXES: list[Path] = [
+    (REPO_ROOT / "querity_team" / "tests").resolve(),
+    (REPO_ROOT / ".git").resolve(),
+]
 
 
 def write_repo_file(relative_path: str, content: str) -> dict[str, Any]:
-    """Write or update a file inside the repository (blocks .env, .git, and protected gate/baseline files)."""
-    norm = relative_path.replace("\\", "/").lstrip("/")
-    if (
-        norm.startswith(".git")
-        or norm.endswith(".env")
-        or "/.env" in norm
-        or norm in _PROTECTED_AGENT_PATHS
-        or norm.startswith("querity_team/tests/")
-    ):
-        raise ValueError(f"Refusing to write protected path: {relative_path}")
+    """Write or update a file inside the repository.
+
+    Blocks .env, .git, and protected gate/baseline files using **resolved** absolute
+    paths so path-traversal tricks (e.g. ``querity_team/./baseline_metrics.json`` or
+    ``querity_team/../querity_team/baseline_metrics.json``) are defeated before
+    any string comparison is made.
+    """
     target = (REPO_ROOT / relative_path).resolve()
+
+    # 1. Must stay inside the repository root.
     if not str(target).startswith(str(REPO_ROOT.resolve())):
         raise ValueError("Access denied outside repository root.")
+
+    # 2. Block .env files anywhere in the tree.
+    if target.name == ".env" or any(p.name == ".env" for p in target.parents):
+        raise ValueError(f"Refusing to write protected path: {relative_path}")
+
+    # 3. Block exact protected files (resolved paths — immune to traversal).
+    if target in _PROTECTED_AGENT_PATHS:
+        raise ValueError(f"Refusing to write protected path: {relative_path}")
+
+    # 4. Block protected directory prefixes.
+    target_str = str(target)
+    if any(target_str.startswith(str(prefix)) for prefix in _PROTECTED_PREFIXES):
+        raise ValueError(f"Refusing to write protected path: {relative_path}")
+
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     return {"written": relative_path, "bytes": len(content.encode("utf-8"))}

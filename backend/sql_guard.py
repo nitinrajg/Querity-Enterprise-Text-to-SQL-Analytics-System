@@ -78,13 +78,14 @@ ALLOWED_ROOT_NODES = tuple(
     if cls is not None
 )
 
+# Only SHOW and DESCRIBE are allowed as meta root nodes via the AST path.
+# EXPLAIN and SUMMARIZE are intentionally excluded here — they are handled
+# in the Command path below with stricter inner-query validation.
 ALLOWED_META_ROOT_NODES = tuple(
     cls
     for cls in (
         getattr(exp, "Show", None),
         getattr(exp, "Describe", None),
-        getattr(exp, "Explain", None),
-        getattr(exp, "Summarize", None),
     )
     if cls is not None
 )
@@ -137,10 +138,17 @@ def validate_sql_safety(
     is_query = isinstance(stmt, ALLOWED_ROOT_NODES)
     is_meta = allow_meta and isinstance(stmt, ALLOWED_META_ROOT_NODES)
 
-    # Handle DuckDB SUMMARIZE/DESCRIBE if sqlglot parses them as Command
+    # Handle DuckDB SHOW/DESCRIBE/SUMMARIZE if sqlglot parses them as Command.
+    # EXPLAIN and EXPLAIN ANALYZE are always rejected — EXPLAIN ANALYZE executes
+    # the wrapped DML statement in DuckDB, which is a critical data-destruction risk.
     if allow_meta and isinstance(stmt, exp.Command):
         cmd_name = (stmt.name or "").upper()
-        if cmd_name in {"SHOW", "DESCRIBE", "EXPLAIN", "SUMMARIZE"}:
+        if cmd_name in {"EXPLAIN", "SUMMARIZE"}:
+            raise SQLSafetyError(
+                f"EXPLAIN and SUMMARIZE are not allowed in the playground. "
+                f"Use SHOW or DESCRIBE instead."
+            )
+        if cmd_name in {"SHOW", "DESCRIBE"}:
             return f"{stmt.sql(dialect=dialect).rstrip(';')};"
 
     if not (is_query or is_meta):

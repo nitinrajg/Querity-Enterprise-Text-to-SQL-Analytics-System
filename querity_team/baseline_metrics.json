@@ -1,12 +1,12 @@
 {
-  "seeded_at": "2026-11-26T10:59:51.848647+00:00",
-  "pytest_total": 33,
-  "pytest_passed": 33,
-  "eval_cases_total": 31,
+  "seeded_at": "2026-11-26T11:12:59.404186+00:00",
+  "pytest_total": 41,
+  "pytest_passed": 41,
+  "eval_cases_total": 34,
   "execution_accuracy": 100.0,
   "sql_syntax_validity": 100.0,
   "guardrail_block_rate": 100.0,
   "postgres_transpile_rate": 100.0,
   "category_accuracy": {},
-  "p95_latency_ms": 16.12
+  "p95_latency_ms": 15.772
 }
