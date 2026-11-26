@@ -334,9 +334,9 @@ async def run_query(payload: QueryRequest):
         logger.warning("NVIDIA generation failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Could not generate SQL: {exc}")
 
-    # 3. Validate the SQL is safe to run (read-only, no destructive statements, ensure limit)
+    # 3. Validate the SQL is safe to run (read-only PostgreSQL query, ensure limit)
     try:
-        generated_sql = validate_sql_safety(generated_sql)
+        generated_sql = validate_sql_safety(generated_sql, dialect="postgres")
     except SQLSafetyError as exc:
         logger.warning("Unsafe SQL blocked: %s", generated_sql)
         raise HTTPException(status_code=400, detail=f"Generated query was blocked: {exc}")
@@ -452,7 +452,7 @@ async def run_playground_query(payload: PlaygroundRequest):
     start = time.perf_counter()
 
     try:
-        safe_sql = validate_sql_safety(payload.sql)
+        safe_sql = validate_sql_safety(payload.sql, dialect="postgres")
     except SQLSafetyError as exc:
         raise HTTPException(status_code=400, detail=f"Query blocked by safety guard: {exc}")
 

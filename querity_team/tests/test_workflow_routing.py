@@ -101,13 +101,14 @@ def _setup_fake_workflow(
     mem_file.write_text("# Memory", encoding="utf-8")
 
     monkeypatch.setattr(dn, "get_current_git_branch", lambda _root=None: "feat/test-workflow")
+    monkeypatch.setattr(dn, "get_unapproved_workspace_changes", lambda _root=None: [])
     monkeypatch.setattr(dn, "BASELINE_PATH", baseline_file)
     monkeypatch.setattr(dn, "EVAL_CASES_PATH", eval_file)
     monkeypatch.setattr(dn, "TEAM_MEMORY_PATH", mem_file)
     monkeypatch.setattr(
         dn,
         "_run_pytest_targets",
-        lambda _targets: (5, 5, 0, "5 passed") if gate_passes else (5, 4, 1, "1 failed"),
+        lambda _targets, **_kw: (5, 5, 0, "5 passed") if gate_passes else (5, 4, 1, "1 failed"),
     )
     return calls
 
@@ -230,3 +231,38 @@ def test_workflow_retry_analyst_routes_through_join_cleanly(
     assert calls.count("checker") == 2
     assert calls.count("lead") == 1
     assert calls[-1] == "lead"
+
+
+def test_workflow_pauses_before_running_unapproved_code_edits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """When workspace files were edited, guarded_runner_node must interrupt for human approval BEFORE running code."""
+    calls = _setup_fake_workflow(
+        monkeypatch,
+        tmp_path,
+        checker_replies=['{"status": "PASS", "score": 100, "target_agent": "none", "numbered_fixes": [], "round_number": 0, "reason": "ok"}'],
+        gate_passes=True,
+    )
+    # Simulate an unreviewed code edit by engineer_agent
+    monkeypatch.setattr(dn, "get_unapproved_workspace_changes", lambda _root=None: ["backend/sql_guard.py"])
+
+    runner_executed = []
+    monkeypatch.setattr(
+        dn,
+        "_run_pytest_targets",
+        lambda _targets, **_kw: (runner_executed.append(True), (5, 5, 0, "5 passed"))[1],
+    )
+
+    events = asyncio.run(_run_real_workflow())
+    assert calls.count("analyst") == 1
+    assert calls.count("engineer") == 1
+    # Execution MUST pause before pytest/eval worker or checker or lead runs
+    assert runner_executed == []
+    assert calls.count("checker") == 0
+    assert calls.count("lead") == 0
+    assert any(
+        ev.content
+        and ev.content.parts
+        and any(getattr(p, "function_call", None) and p.function_call.name == "adk_request_input" for p in ev.content.parts)
+        for ev in events
+    )

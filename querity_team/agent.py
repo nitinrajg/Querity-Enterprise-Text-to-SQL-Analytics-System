@@ -9,8 +9,9 @@ from typing import Any
 from dotenv import load_dotenv
 from google.adk import Agent, Workflow
 from google.adk.events import Event, EventActions
-from google.adk.workflow import JoinNode, RetryConfig, START
+from google.adk.workflow import FunctionNode, JoinNode, RetryConfig, START
 
+from . import deterministic_nodes as _dn
 from .deterministic_nodes import (
     deterministic_gate_node,
     get_git_diff,
@@ -154,6 +155,19 @@ lead_agent = Agent(
     output_key="final_summary",
 )
 
+def _needs_pre_exec_human_approval(*args: Any, **kwargs: Any) -> bool:
+    """Require explicit human approval before executing agent-modified code/tests."""
+    return bool(_dn.get_unapproved_workspace_changes())
+
+
+guarded_runner_node = FunctionNode(
+    func=run_benchmark_and_guardrails,
+    name="run_benchmark_and_guardrails",
+    require_confirmation=_needs_pre_exec_human_approval,
+    rerun_on_resume=True,
+)
+
+
 root_agent = Workflow(
     name="querity_eval_to_pr_team",
     description="ADK 2.x graph workflow for Querity Eval-to-PR with parallel fan-out, deterministic Runner/DetGate, 2-round quality loop, and HITL gate.",
@@ -166,9 +180,9 @@ root_agent = Workflow(
         (analyst_agent, join_analysis_and_preflight),
         (preflight_check, join_analysis_and_preflight),
         (join_analysis_and_preflight, engineer_agent),
-        # Engineer -> Deterministic Runner -> Deterministic Gate
-        (engineer_agent, run_benchmark_and_guardrails),
-        (run_benchmark_and_guardrails, deterministic_gate_node),
+        # Engineer -> Human-Approval-Guarded Sandbox Runner -> Deterministic Gate
+        (engineer_agent, guarded_runner_node),
+        (guarded_runner_node, deterministic_gate_node),
         # DetGate conditional routing (max 2 rounds; p95 latency warning-only)
         (
             deterministic_gate_node,

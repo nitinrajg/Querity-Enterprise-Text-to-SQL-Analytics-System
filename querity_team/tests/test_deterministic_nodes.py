@@ -223,6 +223,11 @@ def test_write_repo_file_blocks_pytest_ini_tests_and_non_allowlisted_files(
 
     for forbidden in (
         "pytest.ini",
+        "conftest.py",
+        "backend/conftest.py",
+        "backend/main.py",
+        "backend/__init__.py",
+        "backend/sitecustomize.py",
         ".github/workflows/eval-ci.yml",
         "backend/requirements.txt",
         "backend/test_sql_guard_hardening.py",
@@ -292,3 +297,115 @@ def test_det_gate_catches_shrunk_eval_cases(tmp_path: Path):
     assert route == "retry_engineer"
     assert verdict.status == "FAIL"
     assert any("shrank" in fix for fix in verdict.numbered_fixes)
+
+
+def test_sandboxed_grader_blocks_conftest_and_secret_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Untrusted conftest.py or test code cannot read .env/env secrets or mutate baseline_metrics.json."""
+    import querity_team.deterministic_nodes as dn
+
+    repo_copy = tmp_path / "repo"
+    (repo_copy / "backend").mkdir(parents=True)
+    (repo_copy / "querity_team").mkdir(parents=True)
+    (repo_copy / "db").mkdir(parents=True)
+
+    real_repo = dn.REPO_ROOT
+    (repo_copy / "backend" / "sql_guard.py").write_text(
+        (real_repo / "backend" / "sql_guard.py").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (repo_copy / "querity_team" / "__init__.py").write_text("", encoding="utf-8")
+    (repo_copy / "querity_team" / "schemas.py").write_text(
+        (real_repo / "querity_team" / "schemas.py").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (repo_copy / "db" / "schema.sql").write_text(
+        (real_repo / "db" / "schema.sql").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (repo_copy / "pytest.ini").write_text("[pytest]\npythonpath = .\n", encoding="utf-8")
+    (repo_copy / ".env").write_text("GEMINI_API_KEY=DO_NOT_LEAK_DOTENV\n", encoding="utf-8")
+
+    baseline_file = repo_copy / "querity_team" / "baseline_metrics.json"
+    baseline_json = BaselineMetrics(
+        seeded_at="2026-11-26T00:00:00Z",
+        pytest_total=1,
+        pytest_passed=1,
+        eval_cases_total=1,
+        execution_accuracy=100.0,
+        sql_syntax_validity=100.0,
+        guardrail_block_rate=100.0,
+        p95_latency_ms=10.0,
+    ).model_dump_json()
+    baseline_file.write_text(baseline_json, encoding="utf-8")
+
+    eval_file = repo_copy / "querity_team" / "eval_cases.json"
+    eval_file.write_text(
+        json.dumps([
+            {
+                "id": "e1",
+                "kind": "safe",
+                "category": "aggregation",
+                "dialect": "duckdb",
+                "question": "Count products",
+                "sql": "SELECT COUNT(*) FROM products",
+                "gold_sql": "SELECT COUNT(*) FROM products LIMIT 50",
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    # Plant an attacker conftest.py that would mutate baseline if pytest ever loaded it
+    (repo_copy / "backend" / "conftest.py").write_text(
+        "raise RuntimeError('conftest.py MUST NOT BE LOADED')\n",
+        encoding="utf-8",
+    )
+    # Plant a test verifying that neither env secrets nor .env nor real baseline_metrics.json exist in sandbox
+    (repo_copy / "backend" / "test_sandbox_env.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "def test_no_secrets_and_no_real_baseline():\n"
+        "    assert 'GEMINI_API_KEY' not in os.environ\n"
+        "    assert not Path('.env').exists()\n"
+        "    assert not Path('querity_team/baseline_metrics.json').exists()\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("GEMINI_API_KEY", "SUPER_SECRET_ENV_VALUE")
+    monkeypatch.setattr(dn, "REPO_ROOT", repo_copy)
+    monkeypatch.setattr(dn, "get_unapproved_workspace_changes", lambda _r=None: ["backend/conftest.py"])
+
+    res = dn.run_benchmark_and_guardrails(
+        pytest_targets=["backend/test_sandbox_env.py"],
+        eval_cases_path=eval_file,
+        baseline_path=baseline_file,
+        schema_path=repo_copy / "db" / "schema.sql",
+    )
+    report = EvalReport.model_validate(res["eval_report"])
+    assert report.pytest_passed == 1
+    assert report.pytest_failed == 0
+    assert report.requires_human_review is True
+    assert "backend/conftest.py" in report.modified_exam_files
+    # Real baseline file was never touched
+    assert json.loads(baseline_file.read_text(encoding="utf-8"))["pytest_total"] == 1
+
+
+def test_git_pr_tool_enforces_hitl_confirmation():
+    """git_pr_tool must block calls without ToolContext and flag modified files on confirmation."""
+    from unittest.mock import MagicMock
+    from querity_team.deterministic_nodes import git_pr_tool
+
+    blocked = git_pr_tool(action="commit", commit_message="auto commit")
+    assert blocked["status"] == "blocked_requires_human_approval"
+
+    ctx = MagicMock()
+    ctx.state = {
+        "eval_report": {
+            "requires_human_review": True,
+            "modified_exam_files": ["backend/sql_guard.py", "querity_team/eval_cases.json"],
+        }
+    }
+    ctx.tool_confirmation = None
+    awaiting = git_pr_tool(action="commit", commit_message="feat: update", tool_context=ctx)
+    assert awaiting["status"] == "awaiting_human_approval"
+    assert awaiting["requires_human_review"] is True
+    assert "backend/sql_guard.py" in awaiting["modified_files"]
+    ctx.request_confirmation.assert_called_once()

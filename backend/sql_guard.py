@@ -44,12 +44,13 @@ UNSAFE_AST_NODES = tuple(
 # Deny-by-default blocks pg_read_binary_file, pg_sleep, set_config, query_to_xml, dblink,
 # pg_terminate_backend, current_setting, read_text, read_csv, glob, version, etc.
 ALLOWED_FUNCTIONS = {
-    # AST logical/conditional operators that subclass exp.Func in sqlglot
+    # AST logical/conditional/type expressions that subclass exp.Func in sqlglot
     "and",
     "or",
     "xor",
     "case",
     "if",
+    "exists",
     "cast",
     "try_cast",
     "collate",
@@ -58,6 +59,9 @@ ALLOWED_FUNCTIONS = {
     "ifnull",
     "greatest",
     "least",
+    "array",
+    "date",
+    "timestamp",
     # Aggregates & statistical functions
     "count",
     "count_if",
@@ -196,8 +200,45 @@ ALLOWED_META_ROOT_NODES = tuple(
 )
 
 
+_BLOCKED_SYSTEM_SCHEMAS = {
+    "information_schema",
+    "pg_catalog",
+    "pg_toast",
+    "duckdb_catalog",
+    "sys",
+    "temp",
+    "pg_temp",
+}
+_BLOCKED_TABLE_PREFIXES = ("pg_", "duckdb_", "sqlite_")
+
+
 class SQLSafetyError(Exception):
     """Raised when a generated query fails a safety check."""
+
+
+def _check_tables(stmt: exp.Expression, allowed_tables: set[str] | None = None) -> None:
+    """Block system catalog tables/schemas (e.g. pg_shadow, information_schema) and optionally enforce table allowlist."""
+    cte_names = {
+        cte.alias_or_name.lower()
+        for cte in stmt.find_all(exp.CTE)
+        if getattr(cte, "alias_or_name", None)
+    }
+    normalized_allowlist = {t.lower() for t in allowed_tables} if allowed_tables is not None else None
+
+    for table in stmt.find_all(exp.Table):
+        schema = (table.db or "").lower()
+        name = (table.name or "").lower()
+        if schema:
+            if schema in _BLOCKED_SYSTEM_SCHEMAS or schema not in {"public", "main"}:
+                raise SQLSafetyError(f"Access to schema '{table.db}' is not allowed.")
+        elif name in cte_names:
+            continue
+
+        if any(name.startswith(prefix) for prefix in _BLOCKED_TABLE_PREFIXES):
+            raise SQLSafetyError(f"Access to system table '{table.name}' is not allowed.")
+
+        if normalized_allowlist is not None and name not in normalized_allowlist:
+            raise SQLSafetyError(f"Table '{table.name}' is not in the allowed tables list.")
 
 
 def _check_allowed_functions(stmt: exp.Expression) -> None:
@@ -220,6 +261,7 @@ def validate_sql_safety(
     default_limit: int = 50,
     dialect: str = "duckdb",
     allow_meta: bool = False,
+    allowed_tables: set[str] | None = None,
 ) -> str:
     """
     Validates via sqlglot AST that the SQL is a single, safe, read-only query.
@@ -267,6 +309,7 @@ def validate_sql_safety(
         if isinstance(node, UNSAFE_AST_NODES):
             raise SQLSafetyError(f"Query contains a disallowed SQL operation: {type(node).__name__}")
 
+    _check_tables(stmt, allowed_tables=allowed_tables)
     _check_allowed_functions(stmt)
 
     if is_query and stmt.args.get("limit") is None:

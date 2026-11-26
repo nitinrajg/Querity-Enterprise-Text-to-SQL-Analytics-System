@@ -143,3 +143,63 @@ def test_approved_analytical_functions_allowed_both_dialects(dialect: str, sql: 
     """Logical operators and analytical SQL functions must pass under the allowlist in both dialects."""
     validated = validate_sql_safety(sql, dialect=dialect)
     assert validated.endswith(";")
+
+
+def test_postgres_dialect_preserves_to_char_format_and_main_uses_postgres():
+    """Passing dialect='postgres' must preserve TO_CHAR format string instead of rewriting via DuckDB."""
+    formatted = validate_sql_safety(
+        "SELECT TO_CHAR(order_date, 'YYYY-MM') AS ym FROM orders",
+        dialect="postgres",
+    )
+    assert "'YYYY-MM'" in formatted
+    assert "TO_CHAR" in formatted.upper()
+
+    main_src = (Path(__file__).parent / "main.py").read_text(encoding="utf-8")
+    assert 'validate_sql_safety(generated_sql, dialect="postgres")' in main_src
+    assert 'validate_sql_safety(payload.sql, dialect="postgres")' in main_src
+
+
+@pytest.mark.parametrize(
+    "dialect,sql",
+    [
+        ("duckdb", "SELECT c.name FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)"),
+        ("postgres", "SELECT c.name FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)"),
+        ("duckdb", "SELECT DATE(order_date) AS d FROM orders"),
+        ("postgres", "SELECT DATE(order_date) AS d FROM orders"),
+        ("duckdb", "SELECT ARRAY[1, 2, 3] AS arr"),
+        ("postgres", "SELECT ARRAY[1, 2, 3] AS arr"),
+        ("postgres", "WITH pg_shadow_cte AS (SELECT 1 AS id) SELECT * FROM pg_shadow_cte"),
+    ],
+)
+def test_common_sql_constructs_and_ctes_allowed(dialect: str, sql: str):
+    """EXISTS, DATE(), ARRAY[], and harmless CTEs must be accepted across dialects."""
+    validated = validate_sql_safety(sql, dialect=dialect)
+    assert validated.endswith(";")
+
+
+@pytest.mark.parametrize(
+    "dialect,sql",
+    [
+        ("postgres", "SELECT * FROM pg_shadow;"),
+        ("postgres", "SELECT * FROM pg_catalog.pg_roles;"),
+        ("postgres", "SELECT * FROM information_schema.tables;"),
+        ("duckdb", "SELECT * FROM duckdb_settings();"),
+        ("postgres", "SELECT generate_series(1, 1000000);"),
+    ],
+)
+def test_system_catalogs_and_unbounded_series_blocked(dialect: str, sql: str):
+    """System tables/schemas and unbounded generate_series must be rejected."""
+    with pytest.raises(SQLSafetyError):
+        validate_sql_safety(sql, dialect=dialect)
+
+
+def test_allowed_tables_parameter_restricts_tables():
+    """Optional allowed_tables parameter blocks unapproved tables while allowing CTEs over approved tables."""
+    ok = validate_sql_safety(
+        "WITH c AS (SELECT id FROM orders) SELECT * FROM c",
+        dialect="postgres",
+        allowed_tables={"orders"},
+    )
+    assert ok.endswith(";")
+    with pytest.raises(SQLSafetyError):
+        validate_sql_safety("SELECT * FROM customers", dialect="postgres", allowed_tables={"orders"})

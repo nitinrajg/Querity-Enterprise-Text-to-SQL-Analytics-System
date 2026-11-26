@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import duckdb
 import sqlglot
 from google.adk.events import Event, EventActions
 from google.adk.tools import ToolContext
@@ -106,38 +108,238 @@ def preflight_check(
     }
 
 
-def _load_duckdb_from_schema(schema_path: Path = SCHEMA_SQL_PATH) -> duckdb.DuckDBPyConnection:
-    """Load db/schema.sql into an in-memory DuckDB connection for deterministic SQL evals."""
-    raw_sql = schema_path.read_text(encoding="utf-8")
-    adapted = re.sub(r"\bDROP\s+TABLE\s+IF\s+EXISTS\s+(\w+)\s+CASCADE;", r"DROP TABLE IF EXISTS \1;", raw_sql, flags=re.IGNORECASE)
-    adapted = re.sub(r"\bON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT)\b", "", adapted, flags=re.IGNORECASE)
+_SANDBOX_SAFE_ENV_KEYS = (
+    "PATH",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "OS",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "LANG",
+    "LC_ALL",
+    "PYTHONIOENCODING",
+    "VIRTUAL_ENV",
+    "HOME",
+    "USERPROFILE",
+)
 
-    conn = duckdb.connect(":memory:", config={"enable_external_access": False})
-    seq_idx = 0
-    def _replace_serial(match: re.Match[str]) -> str:
-        nonlocal seq_idx
-        seq_idx += 1
-        seq_name = f"seq_serial_{seq_idx}"
-        conn.execute(f"CREATE SEQUENCE {seq_name} START 1;")
-        return f"INTEGER PRIMARY KEY DEFAULT nextval('{seq_name}')"
+_EVAL_WORKER_SCRIPT = r"""
+import json, re, sys, time
+from pathlib import Path
+import duckdb
+import sqlglot
 
-    adapted = re.sub(r"\bSERIAL\s+PRIMARY\s+KEY\b", _replace_serial, adapted, flags=re.IGNORECASE)
-    for stmt in adapted.split(";"):
-        clean = stmt.strip()
-        if not clean:
-            continue
-        non_comment_lines = [ln for ln in clean.splitlines() if not ln.strip().startswith("--")]
-        executable = "\n".join(non_comment_lines).strip()
-        if executable:
-            conn.execute(executable)
-    return conn
+sandbox_root = Path(sys.argv[1])
+eval_cases_path = Path(sys.argv[2])
+schema_path = Path(sys.argv[3])
+sys.path.insert(0, str(sandbox_root / "backend"))
+from sql_guard import SQLSafetyError, validate_sql_safety
+
+raw_sql_ddl = schema_path.read_text(encoding="utf-8")
+adapted = re.sub(r"\bDROP\s+TABLE\s+IF\s+EXISTS\s+(\w+)\s+CASCADE;", r"DROP TABLE IF EXISTS \1;", raw_sql_ddl, flags=re.IGNORECASE)
+adapted = re.sub(r"\bON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT)\b", "", adapted, flags=re.IGNORECASE)
+conn = duckdb.connect(":memory:", config={"enable_external_access": False})
+seq_idx = 0
+def _replace_serial(match):
+    global seq_idx
+    seq_idx += 1
+    seq_name = f"seq_serial_{seq_idx}"
+    conn.execute(f"CREATE SEQUENCE {seq_name} START 1;")
+    return f"INTEGER PRIMARY KEY DEFAULT nextval('{seq_name}')"
+adapted = re.sub(r"\bSERIAL\s+PRIMARY\s+KEY\b", _replace_serial, adapted, flags=re.IGNORECASE)
+for stmt in adapted.split(";"):
+    clean = stmt.strip()
+    if not clean:
+        continue
+    executable = "\n".join(ln for ln in clean.splitlines() if not ln.strip().startswith("--")).strip()
+    if executable:
+        conn.execute(executable)
+
+cases = json.loads(eval_cases_path.read_text(encoding="utf-8"))
+safe_cases = [c for c in cases if c.get("kind") == "safe"]
+unsafe_cases = [c for c in cases if c.get("kind") == "unsafe"]
+
+syntax_valid_count = 0
+exec_match_count = 0
+postgres_transpile_count = 0
+guardrail_blocked_count = 0
+latencies_ms = []
+taxonomy = {}
+cat_totals = {}
+cat_passed = {}
+
+for case in safe_cases:
+    t0 = time.perf_counter()
+    raw_sql = case["sql"]
+    gold_sql = case["gold_sql"]
+    dialect = case.get("dialect", "duckdb")
+    cat = case.get("category", "general")
+    cat_totals[cat] = cat_totals.get(cat, 0) + 1
+    try:
+        validated_sql = validate_sql_safety(raw_sql, dialect=dialect)
+    except SQLSafetyError:
+        taxonomy["guardrail_false_positive"] = taxonomy.get("guardrail_false_positive", 0) + 1
+        latencies_ms.append((time.perf_counter() - t0) * 1000.0)
+        continue
+    try:
+        sqlglot.parse_one(validated_sql, read=dialect)
+        syntax_valid_count += 1
+    except Exception:
+        taxonomy["dialect_syntax_error"] = taxonomy.get("dialect_syntax_error", 0) + 1
+        latencies_ms.append((time.perf_counter() - t0) * 1000.0)
+        continue
+    try:
+        sqlglot.transpile(validated_sql, read=dialect, write="postgres")
+        postgres_transpile_count += 1
+    except Exception:
+        taxonomy["postgres_transpile_error"] = taxonomy.get("postgres_transpile_error", 0) + 1
+    try:
+        actual_rows = conn.execute(validated_sql).fetchall()
+        gold_rows = conn.execute(gold_sql).fetchall()
+        if actual_rows == gold_rows:
+            exec_match_count += 1
+            cat_passed[cat] = cat_passed.get(cat, 0) + 1
+        else:
+            taxonomy["execution_mismatch"] = taxonomy.get("execution_mismatch", 0) + 1
+    except Exception:
+        taxonomy["execution_error"] = taxonomy.get("execution_error", 0) + 1
+    latencies_ms.append((time.perf_counter() - t0) * 1000.0)
+
+for case in unsafe_cases:
+    t0 = time.perf_counter()
+    cat = case.get("category", "adversarial")
+    dialect = case.get("dialect", "duckdb")
+    cat_totals[cat] = cat_totals.get(cat, 0) + 1
+    try:
+        validate_sql_safety(case["sql"], dialect=dialect)
+        taxonomy["guardrail_false_negative"] = taxonomy.get("guardrail_false_negative", 0) + 1
+    except SQLSafetyError:
+        guardrail_blocked_count += 1
+        cat_passed[cat] = cat_passed.get(cat, 0) + 1
+    latencies_ms.append((time.perf_counter() - t0) * 1000.0)
+
+conn.close()
+print(json.dumps({
+    "eval_cases_total": len(cases),
+    "safe_total": len(safe_cases),
+    "unsafe_total": len(unsafe_cases),
+    "syntax_valid_count": syntax_valid_count,
+    "exec_match_count": exec_match_count,
+    "postgres_transpile_count": postgres_transpile_count,
+    "guardrail_blocked_count": guardrail_blocked_count,
+    "latencies_ms": latencies_ms,
+    "taxonomy": taxonomy,
+    "cat_totals": cat_totals,
+    "cat_passed": cat_passed,
+}))
+"""
 
 
-def _run_pytest_targets(targets: list[str], repo_root: Path = REPO_ROOT) -> tuple[int, int, int, str]:
-    """Run pytest on target test files and parse passed/failed counts."""
+def _sanitized_sandbox_env(sandbox_root: Path) -> dict[str, str]:
+    """Build a minimal subprocess env stripped of all API secrets, tokens, and DB credentials."""
+    env: dict[str, str] = {}
+    for key in _SANDBOX_SAFE_ENV_KEYS:
+        if key in os.environ:
+            env[key] = os.environ[key]
+    tmp_dir = sandbox_root / "_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    env["TMP"] = str(tmp_dir)
+    env["TEMP"] = str(tmp_dir)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONPATH"] = str(sandbox_root)
+    return env
+
+
+def _prepare_grading_sandbox(
+    sandbox_root: Path,
+    repo_root: Path,
+    cases_file: Path,
+    schema_file: Path,
+    targets: list[str],
+) -> tuple[Path, Path]:
+    """Populate a disposable secret-free workspace copy without .env, .git, conftest.py, or baseline_metrics.json."""
+    backend_dst = sandbox_root / "backend"
+    backend_dst.mkdir(parents=True, exist_ok=True)
+    backend_src = repo_root / "backend"
+    if backend_src.exists():
+        for py_file in backend_src.glob("*.py"):
+            if py_file.name in {"conftest.py", "sitecustomize.py", "usercustomize.py"}:
+                continue
+            shutil.copy2(py_file, backend_dst / py_file.name)
+
+    qt_dst = sandbox_root / "querity_team"
+    qt_dst.mkdir(parents=True, exist_ok=True)
+    for rel in ("querity_team/__init__.py", "querity_team/schemas.py"):
+        src = repo_root / rel
+        if src.exists():
+            shutil.copy2(src, sandbox_root / rel)
+
+    if (repo_root / "pytest.ini").exists():
+        shutil.copy2(repo_root / "pytest.ini", sandbox_root / "pytest.ini")
+
+    sandbox_cases = qt_dst / "eval_cases.json"
+    shutil.copy2(cases_file, sandbox_cases)
+
+    db_dst = sandbox_root / "db"
+    db_dst.mkdir(parents=True, exist_ok=True)
+    sandbox_schema = db_dst / "schema.sql"
+    shutil.copy2(schema_file, sandbox_schema)
+
+    for t in targets:
+        t_path = repo_root / t
+        if t_path.exists():
+            dst = sandbox_root / t
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(t_path, dst)
+
+    return sandbox_cases, sandbox_schema
+
+
+def get_unapproved_workspace_changes(repo_root: Path | None = None) -> list[str]:
+    """Return sorted relative paths of modified/untracked files relevant to code, tests, or evals."""
+    root = repo_root or REPO_ROOT
+    changed: list[str] = []
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            return []
+        for line in proc.stdout.splitlines():
+            if len(line) <= 3:
+                continue
+            path_part = line[3:].strip().replace("\\", "/")
+            if " -> " in path_part:
+                path_part = path_part.split(" -> ", 1)[1].strip()
+            if (
+                path_part.startswith("backend/")
+                or path_part in {"pytest.ini", "conftest.py", "querity_team/eval_cases.json"}
+                or path_part.startswith("querity_team/tests/")
+                or path_part.startswith(".github/")
+            ):
+                changed.append(path_part)
+    except Exception:
+        return []
+    return sorted(set(changed))
+
+
+def _run_pytest_targets(
+    targets: list[str],
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[int, int, int, str]:
+    """Run pytest with --noconftest inside an isolated working directory and sanitized environment."""
+    run_cwd = cwd or REPO_ROOT
+    run_env = env if env is not None else _sanitized_sandbox_env(run_cwd)
     proc = subprocess.run(
-        [sys.executable, "-m", "pytest", *targets, "-q", "--tb=short"],
-        cwd=repo_root,
+        [sys.executable, "-m", "pytest", "--noconftest", *targets, "-q", "--tb=short"],
+        cwd=run_cwd,
+        env=run_env,
         capture_output=True,
         text=True,
     )
@@ -166,6 +368,10 @@ def _percentile(values: list[float], pct: float) -> float:
     return round(ordered[idx], 3)
 
 
+def _sha256_or_none(path: Path) -> str | None:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+
+
 def run_benchmark_and_guardrails(
     node_input: Any = None,
     pytest_targets: list[str] | None = None,
@@ -174,95 +380,60 @@ def run_benchmark_and_guardrails(
     schema_path: Path | None = None,
     round_number: int = 0,
 ) -> dict[str, Any]:
-    """Deterministic Python node: runs pytest, sqlglot, and DuckDB evals, emitting EvalReport JSON."""
-    validate_sql_safety, SQLSafetyError = _import_sql_guard()
+    """Deterministic Python node: runs pytest and DuckDB/sqlglot evals inside a secret-free temp sandbox."""
     targets = pytest_targets if pytest_targets is not None else _discover_pytest_targets(REPO_ROOT)
-    pytest_total, pytest_passed, pytest_failed, pytest_summary = _run_pytest_targets(targets)
-
     cases_file = eval_cases_path or EVAL_CASES_PATH
     resolved_baseline = baseline_path or BASELINE_PATH
     resolved_schema = schema_path or SCHEMA_SQL_PATH
 
-    cases = json.loads(cases_file.read_text(encoding="utf-8"))
-    conn = _load_duckdb_from_schema(resolved_schema)
+    baseline = load_baseline_metrics(resolved_baseline)
+    pre_baseline_hash = _sha256_or_none(resolved_baseline)
 
-    safe_cases = [c for c in cases if c.get("kind") == "safe"]
-    unsafe_cases = [c for c in cases if c.get("kind") == "unsafe"]
+    with tempfile.TemporaryDirectory(prefix="querity_sandbox_") as tmp_dir_str:
+        sandbox_root = Path(tmp_dir_str)
+        sandbox_cases, sandbox_schema = _prepare_grading_sandbox(
+            sandbox_root, REPO_ROOT, cases_file, resolved_schema, targets
+        )
+        sanitized_env = _sanitized_sandbox_env(sandbox_root)
 
-    syntax_valid_count = 0
-    exec_match_count = 0
-    postgres_transpile_count = 0
-    guardrail_blocked_count = 0
-    latencies_ms: list[float] = []
-    taxonomy: dict[str, int] = {}
-    cat_totals: dict[str, int] = {}
-    cat_passed: dict[str, int] = {}
+        pytest_total, pytest_passed, pytest_failed, pytest_summary = _run_pytest_targets(
+            targets, cwd=sandbox_root, env=sanitized_env
+        )
 
-    for case in safe_cases:
-        t0 = time.perf_counter()
-        raw_sql = case["sql"]
-        gold_sql = case["gold_sql"]
-        dialect = case.get("dialect", "duckdb")
-        cat = case.get("category", "general")
-        cat_totals[cat] = cat_totals.get(cat, 0) + 1
-        try:
-            validated_sql = validate_sql_safety(raw_sql, dialect=dialect)
-        except SQLSafetyError:
-            taxonomy["guardrail_false_positive"] = taxonomy.get("guardrail_false_positive", 0) + 1
-            latencies_ms.append((time.perf_counter() - t0) * 1000.0)
-            continue
+        worker_proc = subprocess.run(
+            [sys.executable, "-c", _EVAL_WORKER_SCRIPT, str(sandbox_root), str(sandbox_cases), str(sandbox_schema)],
+            cwd=sandbox_root,
+            env=sanitized_env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        metrics = json.loads(worker_proc.stdout.strip().splitlines()[-1])
 
-        try:
-            sqlglot.parse_one(validated_sql, read=dialect)
-            syntax_valid_count += 1
-        except Exception:
-            taxonomy["dialect_syntax_error"] = taxonomy.get("dialect_syntax_error", 0) + 1
-            latencies_ms.append((time.perf_counter() - t0) * 1000.0)
-            continue
+    post_baseline_hash = _sha256_or_none(resolved_baseline)
+    if post_baseline_hash != pre_baseline_hash:
+        raise RuntimeError("Grading integrity error: baseline_metrics.json was modified during evaluation.")
 
-        try:
-            sqlglot.transpile(validated_sql, read=dialect, write="postgres")
-            postgres_transpile_count += 1
-        except Exception:
-            taxonomy["postgres_transpile_error"] = taxonomy.get("postgres_transpile_error", 0) + 1
+    safe_total = int(metrics["safe_total"])
+    unsafe_total = int(metrics["unsafe_total"])
+    syntax_valid_count = int(metrics["syntax_valid_count"])
+    exec_match_count = int(metrics["exec_match_count"])
+    postgres_transpile_count = int(metrics["postgres_transpile_count"])
+    guardrail_blocked_count = int(metrics["guardrail_blocked_count"])
+    latencies_ms = [float(x) for x in metrics["latencies_ms"]]
+    taxonomy = dict(metrics["taxonomy"])
+    cat_totals = dict(metrics["cat_totals"])
+    cat_passed = dict(metrics["cat_passed"])
 
-        try:
-            actual_rows = conn.execute(validated_sql).fetchall()
-            gold_rows = conn.execute(gold_sql).fetchall()
-            if actual_rows == gold_rows:
-                exec_match_count += 1
-                cat_passed[cat] = cat_passed.get(cat, 0) + 1
-            else:
-                taxonomy["execution_mismatch"] = taxonomy.get("execution_mismatch", 0) + 1
-        except Exception:
-            taxonomy["execution_error"] = taxonomy.get("execution_error", 0) + 1
-        latencies_ms.append((time.perf_counter() - t0) * 1000.0)
-
-    for case in unsafe_cases:
-        t0 = time.perf_counter()
-        cat = case.get("category", "adversarial")
-        dialect = case.get("dialect", "duckdb")
-        cat_totals[cat] = cat_totals.get(cat, 0) + 1
-        try:
-            validate_sql_safety(case["sql"], dialect=dialect)
-            taxonomy["guardrail_false_negative"] = taxonomy.get("guardrail_false_negative", 0) + 1
-        except SQLSafetyError:
-            guardrail_blocked_count += 1
-            cat_passed[cat] = cat_passed.get(cat, 0) + 1
-        latencies_ms.append((time.perf_counter() - t0) * 1000.0)
-
-    conn.close()
-
-    exec_acc = round((exec_match_count / len(safe_cases) * 100.0) if safe_cases else 100.0, 2)
-    syntax_val = round((syntax_valid_count / len(safe_cases) * 100.0) if safe_cases else 100.0, 2)
-    block_rate = round((guardrail_blocked_count / len(unsafe_cases) * 100.0) if unsafe_cases else 100.0, 2)
-    pg_rate = round((postgres_transpile_count / len(safe_cases) * 100.0) if safe_cases else 100.0, 2)
+    exec_acc = round((exec_match_count / safe_total * 100.0) if safe_total else 100.0, 2)
+    syntax_val = round((syntax_valid_count / safe_total * 100.0) if safe_total else 100.0, 2)
+    block_rate = round((guardrail_blocked_count / unsafe_total * 100.0) if unsafe_total else 100.0, 2)
+    pg_rate = round((postgres_transpile_count / safe_total * 100.0) if safe_total else 100.0, 2)
     category_accuracy = {
         k: round(cat_passed.get(k, 0) / total * 100.0, 2) for k, total in sorted(cat_totals.items())
     }
     p95_ms = _percentile(latencies_ms, 95.0)
 
-    baseline = load_baseline_metrics(resolved_baseline)
     deltas = MetricDeltas()
     latency_warning: str | None = None
     if baseline is not None:
@@ -278,12 +449,14 @@ def run_benchmark_and_guardrails(
                 f"{baseline.p95_latency_ms}ms by >25% (warning-only; no FAIL triggered)."
             )
 
+    modified_files = get_unapproved_workspace_changes(REPO_ROOT)
+
     report = EvalReport(
         timestamp=datetime.now(timezone.utc).isoformat(),
         pytest_total=pytest_total,
         pytest_passed=pytest_passed,
         pytest_failed=pytest_failed,
-        eval_cases_total=len(cases),
+        eval_cases_total=int(metrics["eval_cases_total"]),
         execution_accuracy=exec_acc,
         sql_syntax_validity=syntax_val,
         guardrail_block_rate=block_rate,
@@ -294,27 +467,11 @@ def run_benchmark_and_guardrails(
         baseline_deltas=deltas,
         latency_warning=latency_warning,
         raw_pytest_summary=pytest_summary,
+        requires_human_review=bool(modified_files),
+        modified_exam_files=modified_files,
     )
 
     round_num = int(round_number or 0)
-
-    modified_exam_files: list[str] = []
-    try:
-        st = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-        )
-        for line in st.stdout.splitlines():
-            path_part = line[3:].strip().replace("\\", "/") if len(line) > 3 else ""
-            if path_part == "querity_team/eval_cases.json" or path_part.startswith("backend/test_"):
-                modified_exam_files.append(path_part)
-    except Exception:
-        pass
-
-    report.modified_exam_files = modified_exam_files
-    report.requires_human_review = bool(modified_exam_files)
 
     return {
         "eval_report": report.model_dump(),
@@ -401,16 +558,26 @@ def deterministic_gate_node(node_input: dict[str, Any], round_number: int = 0) -
     )
     payload = {**(node_input if isinstance(node_input, dict) else {}), "round_number": effective_round}
     route, verdict, next_round = evaluate_deterministic_gate(payload)
+    eval_report = payload["eval_report"]
+    requires_review = bool(eval_report.get("requires_human_review", False))
+    modified_files = list(eval_report.get("modified_exam_files", []))
     out = {
-        "eval_report": payload["eval_report"],
+        "eval_report": eval_report,
         "det_verdict": verdict.model_dump(),
         "round_number": next_round,
+        "requires_human_review": requires_review,
+        "modified_exam_files": modified_files,
     }
     return Event(
         output=out,
         actions=EventActions(
             route=route,
-            state_delta={"round_number": next_round, "eval_report": payload["eval_report"]},
+            state_delta={
+                "round_number": next_round,
+                "eval_report": eval_report,
+                "requires_human_review": requires_review,
+                "modified_exam_files": modified_files,
+            },
         ),
     )
 
@@ -457,6 +624,16 @@ def _protected_paths(repo_root: Path) -> tuple[set[Path], list[Path], Path]:
     """Resolve protected files and directories relative to repo_root."""
     exact = {
         (repo_root / "pytest.ini").resolve(),
+        (repo_root / "conftest.py").resolve(),
+        (repo_root / "backend" / "conftest.py").resolve(),
+        (repo_root / "backend" / "sitecustomize.py").resolve(),
+        (repo_root / "backend" / "usercustomize.py").resolve(),
+        (repo_root / "backend" / "__init__.py").resolve(),
+        (repo_root / "backend" / "main.py").resolve(),
+        (repo_root / "backend" / "duckdb_service.py").resolve(),
+        (repo_root / "backend" / "ingestion.py").resolve(),
+        (repo_root / "backend" / "schema_service.py").resolve(),
+        (repo_root / "backend" / "nvidia_client.py").resolve(),
         (repo_root / "backend" / "requirements.txt").resolve(),
         (repo_root / "backend" / "test_sql_guard_hardening.py").resolve(),
         (repo_root / "backend" / "test_multitable_joins.py").resolve(),
@@ -511,6 +688,8 @@ def write_repo_file(relative_path: str, content: str) -> dict[str, Any]:
 
     Uses ``Path.resolve()`` and ``Path.is_relative_to()`` for containment so sibling
     directory prefixes (e.g. ``../copy-evil/x``) and dot-segment traversal are blocked.
+    Only ``backend/sql_guard.py``, new ``backend/test_*.py`` regression files, and
+    append-only updates to ``querity_team/eval_cases.json`` are permitted.
     """
     repo_root = REPO_ROOT.resolve()
     target = (repo_root / relative_path).resolve()
@@ -525,10 +704,15 @@ def write_repo_file(relative_path: str, content: str) -> dict[str, Any]:
     if target in protected_exact or any(target.is_relative_to(prefix) for prefix in protected_prefixes):
         raise ValueError(f"Refusing to write protected path: {relative_path}")
 
+    sql_guard_path = (repo_root / "backend" / "sql_guard.py").resolve()
     backend_dir = (repo_root / "backend").resolve()
-    is_allowed_backend_py = target.is_relative_to(backend_dir) and target.suffix == ".py"
+    is_new_regression_test = (
+        target.parent == backend_dir
+        and bool(re.fullmatch(r"test_[a-zA-Z0-9_]+\.py", target.name))
+    )
+    is_sql_guard = target == sql_guard_path
     is_eval_cases = target == eval_cases_path
-    if not (is_allowed_backend_py or is_eval_cases):
+    if not (is_sql_guard or is_new_regression_test or is_eval_cases):
         raise ValueError(f"Refusing to write protected path: {relative_path}")
 
     if is_eval_cases and eval_cases_path.exists():
@@ -553,18 +737,47 @@ def git_pr_tool(
     pr_body: str = "",
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
-    """Guarded Git/PR tool requiring explicit HITL confirmation before any git commit or gh pr create."""
+    """Guarded Git/PR tool requiring explicit HITL confirmation before any git commit or gh pr create.
+
+    Enforces ``requires_human_review``: refuses to run without an approved ``ToolContext``,
+    and lists modified code/test/eval files inside the confirmation prompt when present.
+    """
     if action not in {"commit", "create_pr"}:
         return {"status": "error", "message": f"Unsupported action: {action}"}
 
-    if tool_context is not None and not tool_context.tool_confirmation:
-        tool_context.request_confirmation(
-            hint=f"Approve `{action}` on branch `{get_current_git_branch()}`?",
-            payload={"action": action, "commit_message": commit_message, "pr_title": pr_title},
-        )
-        return {"status": "awaiting_human_approval", "action": action}
+    if tool_context is None:
+        return {
+            "status": "blocked_requires_human_approval",
+            "action": action,
+            "message": "Explicit HITL ToolContext confirmation is required before commit or PR creation.",
+        }
 
-    if tool_context is not None and tool_context.tool_confirmation and not tool_context.tool_confirmation.confirmed:
+    eval_report = tool_context.state.get("eval_report", {}) if isinstance(tool_context.state, dict) else {}
+    requires_review = bool(eval_report.get("requires_human_review", False))
+    modified_files = list(eval_report.get("modified_exam_files", [])) or get_unapproved_workspace_changes()
+    if modified_files:
+        requires_review = True
+
+    if not tool_context.tool_confirmation:
+        review_suffix = f" [HUMAN REVIEW REQUIRED for: {', '.join(modified_files)}]" if requires_review and modified_files else ""
+        tool_context.request_confirmation(
+            hint=f"Approve `{action}` on branch `{get_current_git_branch()}`?{review_suffix}",
+            payload={
+                "action": action,
+                "commit_message": commit_message,
+                "pr_title": pr_title,
+                "requires_human_review": requires_review,
+                "modified_files": modified_files,
+            },
+        )
+        return {
+            "status": "awaiting_human_approval",
+            "action": action,
+            "requires_human_review": requires_review,
+            "modified_files": modified_files,
+        }
+
+    if not tool_context.tool_confirmation.confirmed:
         return {"status": "rejected_by_human", "action": action}
 
     if action == "commit":
