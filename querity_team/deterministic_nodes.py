@@ -933,7 +933,13 @@ def get_full_review_diff(repo_root: Path | None = None) -> tuple[str, bool]:
         sections.append(f"TRACKED DIFF (STAGED + UNSTAGED):\n{tracked_diff.rstrip()}")
     if new_file_sections:
         sections.append("UNTRACKED NEW FILES:\n" + "\n\n".join(new_file_sections))
-    return ("\n\n".join(sections), True)
+    combined = "\n\n".join(sections)
+    if any(c not in "\n\t" and not c.isprintable() for c in combined):
+        return (
+            "ERROR: Changes contain hidden or terminal control characters; review them safely in an editor.",
+            False,
+        )
+    return (combined, True)
 
 
 def get_git_diff() -> str:

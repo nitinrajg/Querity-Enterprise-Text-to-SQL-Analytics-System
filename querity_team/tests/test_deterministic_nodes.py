@@ -584,6 +584,31 @@ def test_full_review_diff_shows_staged_and_untracked_files_and_blocks_binary(tmp
     assert ok2 is False
     assert "Cannot inspect unreadable/binary" in err_text
 
+    # Remove binary file and plant terminal escape control codes in a valid UTF-8 new test file
+    (repo / "backend" / "evil.bin").unlink()
+    (repo / "backend" / "test_escape.py").write_text(
+        "def test_ok():\n    # \x1b[2K\x1b[1Aassert True\n    assert False\n",
+        encoding="utf-8",
+    )
+    ctrl_text, ok3 = get_full_review_diff(repo)
+    assert ok3 is False
+    assert "control characters" in ctrl_text
+
+
+def test_cli_prompt_blocks_control_characters_even_if_diff_marked_inspectable(monkeypatch: pytest.MonkeyPatch):
+    """_prompt_cli_confirmation must reject diffs containing ANSI escape or non-printable chars."""
+    from google.genai import types
+    import querity_team.run as rmod
+
+    monkeypatch.setattr(
+        rmod,
+        "get_full_review_diff",
+        lambda: ("def test_hide():\n\x1b[2K\x1b[1Aassert True\n", True),
+    )
+    monkeypatch.setattr("builtins.input", lambda _p="": pytest.fail("input() must not run on control chars"))
+    fc = types.FunctionCall(id="1", name="adk_request_input", args={"message": "Approve?"})
+    assert rmod._prompt_cli_confirmation(fc) == {"confirmed": False}
+
 
 def test_git_pr_tool_enforces_hitl_confirmation():
     """git_pr_tool must block calls without ToolContext and flag modified files on confirmation."""

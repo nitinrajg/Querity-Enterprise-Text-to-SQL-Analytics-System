@@ -30,6 +30,9 @@ def _prompt_cli_confirmation(func_call: types.FunctionCall) -> dict[str, object]
     args = dict(func_call.args or {})
     print(args.get("message") or f"Approval requested for: {func_call.name}")
     full_review, inspectable = get_full_review_diff()
+    if inspectable and any(c not in "\n\t" and not c.isprintable() for c in full_review):
+        inspectable = False
+        full_review = "Changes contain hidden or control characters; review them in an editor."
     if not inspectable:
         print("\n[APPROVAL BLOCKED] Full changes could not be inspected:")
         print(full_review)
