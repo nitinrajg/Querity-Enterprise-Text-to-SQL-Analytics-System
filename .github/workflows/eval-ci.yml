@@ -27,6 +27,13 @@ jobs:
         run: |
           python -m pytest backend/test_multitable_joins.py backend/test_llm_providers.py backend/test_live_generation.py backend/test_sql_guard_hardening.py querity_team/tests/test_deterministic_nodes.py -v
 
-      - name: Run deterministic Runner and DetGate
+      - name: Run deterministic Runner, DetGate, and Dashboard Generator
         run: |
-          python -c "import json, sys; from querity_team.deterministic_nodes import run_benchmark_and_guardrails, evaluate_deterministic_gate; out = run_benchmark_and_guardrails(); route, verdict, _ = evaluate_deterministic_gate(out); print(json.dumps(out['eval_report'], indent=2)); sys.exit(0 if verdict.status == 'PASS' else 1)"
+          python -c "import json, os, sys; from querity_team.deterministic_nodes import run_benchmark_and_guardrails, evaluate_deterministic_gate, log_run_event; from querity_team.build_dashboard import build_dashboard; out = run_benchmark_and_guardrails(); route, verdict, _ = evaluate_deterministic_gate(out); log_run_event(out['eval_report'], verdict.model_dump(), branch=os.getenv('GITHUB_REF_NAME', 'ci')); build_dashboard(); er = out['eval_report']; summary = os.getenv('GITHUB_STEP_SUMMARY'); open(summary, 'a', encoding='utf-8').write(f'### Querity Eval & Guardrail CI ({verdict.status})\\n- Pytest: {er[\"pytest_passed\"]}/{er[\"pytest_total\"]}\\n- Execution Accuracy: {er[\"execution_accuracy\"]}%\\n- Guardrail Block Rate: {er[\"guardrail_block_rate\"]}%\\n- p95 Latency: {er[\"p95_latency_ms\"]} ms\\n') if summary else None; print(json.dumps(er, indent=2)); sys.exit(0 if verdict.status == 'PASS' else 1)"
+
+      - name: Upload HTML Dashboard Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: querity-eval-dashboard
+          path: querity_team/dashboard.html

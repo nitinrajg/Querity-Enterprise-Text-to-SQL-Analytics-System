@@ -12,6 +12,7 @@ class BaselineMetrics(BaseModel):
     seeded_at: str
     pytest_total: int
     pytest_passed: int
+    eval_cases_total: int = 0
     execution_accuracy: float = Field(ge=0.0, le=100.0)
     sql_syntax_validity: float = Field(ge=0.0, le=100.0)
     guardrail_block_rate: float = Field(ge=0.0, le=100.0)

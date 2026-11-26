@@ -12,6 +12,7 @@ from querity_team.deterministic_nodes import (
     evaluate_deterministic_gate,
     preflight_check,
     run_benchmark_and_guardrails,
+    write_repo_file,
 )
 from querity_team.schemas import BaselineMetrics, EvalReport, MetricDeltas
 
@@ -118,3 +119,45 @@ def test_runner_emits_valid_eval_report():
     assert report.execution_accuracy == 100.0
     assert report.sql_syntax_validity == 100.0
     assert report.guardrail_block_rate == 100.0
+
+
+def test_write_repo_file_blocks_protected_exam_paths():
+    with pytest.raises(ValueError, match="protected"):
+        write_repo_file("querity_team/baseline_metrics.json", "{}")
+    with pytest.raises(ValueError, match="protected"):
+        write_repo_file("querity_team/deterministic_nodes.py", "# hacked")
+
+
+def test_det_gate_catches_shrunk_eval_cases(tmp_path: Path):
+    baseline_file = tmp_path / "baseline.json"
+    baseline_file.write_text(
+        BaselineMetrics(
+            seeded_at="2026-11-26T00:00:00Z",
+            pytest_total=13,
+            pytest_passed=13,
+            eval_cases_total=31,
+            execution_accuracy=100.0,
+            sql_syntax_validity=100.0,
+            guardrail_block_rate=100.0,
+            p95_latency_ms=10.0,
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+    shrunk_report = EvalReport(
+        timestamp="2026-11-26T00:01:00Z",
+        pytest_total=13,
+        pytest_passed=13,
+        pytest_failed=0,
+        eval_cases_total=10,
+        execution_accuracy=100.0,
+        sql_syntax_validity=100.0,
+        guardrail_block_rate=100.0,
+        p95_latency_ms=10.0,
+    ).model_dump()
+
+    route, verdict, _ = evaluate_deterministic_gate(
+        {"eval_report": shrunk_report, "round_number": 0}, baseline_path=baseline_file
+    )
+    assert route == "retry_engineer"
+    assert verdict.status == "FAIL"
+    assert any("shrank" in fix for fix in verdict.numbered_fixes)

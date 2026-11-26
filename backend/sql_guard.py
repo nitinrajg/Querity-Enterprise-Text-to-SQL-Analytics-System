@@ -3,7 +3,8 @@ Guards against unsafe generated SQL before it ever touches the database.
 
 Uses sqlglot AST parsing so string literals containing blocked words,
 semicolons, or comment markers are not false-flagged, while stacked queries,
-non-SELECT/UNION root statements, and unsafe AST nodes are strictly blocked.
+non-read-only root statements, file-reading functions, and unsafe AST nodes
+are strictly blocked.
 """
 
 from __future__ import annotations
@@ -39,16 +40,80 @@ UNSAFE_AST_NODES = tuple(
     cls for name in _UNSAFE_NODE_NAMES if (cls := getattr(exp, name, None)) is not None
 )
 
+# Block file-system, network, and internal-secret inspection functions
+BLOCKED_FUNCTIONS = {
+    "read_text",
+    "read_blob",
+    "read_csv",
+    "read_csv_auto",
+    "read_parquet",
+    "read_json",
+    "read_json_auto",
+    "read_ndjson",
+    "read_ndjson_auto",
+    "read_xlsx",
+    "glob",
+    "duckdb_secrets",
+    "duckdb_settings",
+    "pg_read_file",
+    "pg_ls_dir",
+    "lo_import",
+    "lo_export",
+    "iceberg_scan",
+    "delta_scan",
+    "sqlite_scan",
+    "postgres_scan",
+    "mysql_scan",
+    "getenv",
+}
+
+ALLOWED_ROOT_NODES = tuple(
+    cls
+    for cls in (
+        getattr(exp, "Select", None),
+        getattr(exp, "Union", None),
+        getattr(exp, "Intersect", None),
+        getattr(exp, "Except", None),
+    )
+    if cls is not None
+)
+
+ALLOWED_META_ROOT_NODES = tuple(
+    cls
+    for cls in (
+        getattr(exp, "Show", None),
+        getattr(exp, "Describe", None),
+        getattr(exp, "Explain", None),
+        getattr(exp, "Summarize", None),
+    )
+    if cls is not None
+)
+
 
 class SQLSafetyError(Exception):
     """Raised when a generated query fails a safety check."""
 
 
-def validate_sql_safety(sql: str, default_limit: int = 50, dialect: str = "duckdb") -> str:
+def _check_unsafe_functions(stmt: exp.Expression) -> None:
+    """Walk AST to block file-reading and system-inspection functions."""
+    for node in stmt.walk():
+        if isinstance(node, exp.Anonymous) and node.name.lower() in BLOCKED_FUNCTIONS:
+            raise SQLSafetyError(f"Function '{node.name}' is not allowed.")
+        if isinstance(node, exp.Func):
+            func_name = (node.sql_name() or "").lower()
+            if func_name in BLOCKED_FUNCTIONS:
+                raise SQLSafetyError(f"Function '{func_name}' is not allowed.")
+
+
+def validate_sql_safety(
+    sql: str,
+    default_limit: int = 50,
+    dialect: str = "duckdb",
+    allow_meta: bool = False,
+) -> str:
     """
     Validates via sqlglot AST that the SQL is a single, safe, read-only query.
-    Defensively attaches a LIMIT clause if the query omitted one.
-    Returns the validated SQL query string.
+    Defensively attaches a LIMIT clause to SELECT/set-op queries if omitted.
     """
     if not sql or not sql.strip():
         raise SQLSafetyError("Generated SQL was empty.")
@@ -69,14 +134,25 @@ def validate_sql_safety(sql: str, default_limit: int = 50, dialect: str = "duckd
         raise SQLSafetyError("Multiple SQL statements are not allowed.")
 
     stmt = statements[0]
-    if not isinstance(stmt, (exp.Select, exp.Union)):
+    is_query = isinstance(stmt, ALLOWED_ROOT_NODES)
+    is_meta = allow_meta and isinstance(stmt, ALLOWED_META_ROOT_NODES)
+
+    # Handle DuckDB SUMMARIZE/DESCRIBE if sqlglot parses them as Command
+    if allow_meta and isinstance(stmt, exp.Command):
+        cmd_name = (stmt.name or "").upper()
+        if cmd_name in {"SHOW", "DESCRIBE", "EXPLAIN", "SUMMARIZE"}:
+            return f"{stmt.sql(dialect=dialect).rstrip(';')};"
+
+    if not (is_query or is_meta):
         raise SQLSafetyError("Only SELECT queries are allowed.")
 
     for node in stmt.walk():
         if isinstance(node, UNSAFE_AST_NODES):
             raise SQLSafetyError(f"Query contains a disallowed SQL operation: {type(node).__name__}")
 
-    if stmt.args.get("limit") is None:
+    _check_unsafe_functions(stmt)
+
+    if is_query and stmt.args.get("limit") is None:
         stmt = stmt.limit(default_limit)
 
     return f"{stmt.sql(dialect=dialect)};"

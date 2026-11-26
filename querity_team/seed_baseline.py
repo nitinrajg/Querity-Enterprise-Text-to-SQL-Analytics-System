@@ -19,6 +19,7 @@ def seed_baseline(output_path: Path = BASELINE_PATH) -> BaselineMetrics:
         seeded_at=report.timestamp,
         pytest_total=report.pytest_total,
         pytest_passed=report.pytest_passed,
+        eval_cases_total=report.eval_cases_total,
         execution_accuracy=report.execution_accuracy,
         sql_syntax_validity=report.sql_syntax_validity,
         guardrail_block_rate=report.guardrail_block_rate,

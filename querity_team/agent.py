@@ -85,10 +85,20 @@ checker_agent = Agent(
 
 
 def checker_router(node_input: Any) -> Event:
-    """Route Checker LLM verdict: PASS -> lead_hitl, FAIL (round < 2) -> retry, FAIL (round >= 2) -> lead_hitl."""
+    """Route Checker LLM verdict: PASS -> lead_hitl, FAIL (round < 2) -> retry, FAIL (round >= 2) -> lead_hitl.
+
+    Defaults to FAIL on unparseable output so malformed Checker responses never auto-PASS.
+    """
     raw = node_input
     round_num = 0
-    verdict_dict: dict[str, Any] = {"status": "PASS", "score": 95, "target_agent": "none", "numbered_fixes": [], "round_number": 0, "reason": "Passed."}
+    verdict_dict: dict[str, Any] = {
+        "status": "FAIL",
+        "score": 0,
+        "target_agent": "engineer",
+        "numbered_fixes": ["Checker output was unparseable JSON; re-verify diff and EvalReport."],
+        "round_number": 0,
+        "reason": "Unparseable Checker verdict (fail-closed default).",
+    }
 
     if isinstance(raw, dict):
         round_num = int(raw.get("round_number", 0))

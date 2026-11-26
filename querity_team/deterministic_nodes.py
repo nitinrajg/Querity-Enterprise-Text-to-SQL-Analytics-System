@@ -96,7 +96,7 @@ def _load_duckdb_from_schema(schema_path: Path = SCHEMA_SQL_PATH) -> duckdb.Duck
     adapted = re.sub(r"\bDROP\s+TABLE\s+IF\s+EXISTS\s+(\w+)\s+CASCADE;", r"DROP TABLE IF EXISTS \1;", raw_sql, flags=re.IGNORECASE)
     adapted = re.sub(r"\bON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT)\b", "", adapted, flags=re.IGNORECASE)
 
-    conn = duckdb.connect(":memory:")
+    conn = duckdb.connect(":memory:", config={"enable_external_access": False})
     seq_idx = 0
     def _replace_serial(match: re.Match[str]) -> str:
         nonlocal seq_idx
@@ -303,6 +303,10 @@ def evaluate_deterministic_gate(
         failures.append(f"pytest failed ({report.pytest_failed}/{report.pytest_total}): {report.raw_pytest_summary}")
 
     if baseline is not None:
+        if baseline.eval_cases_total > 0 and report.eval_cases_total < baseline.eval_cases_total:
+            failures.append(
+                f"eval_cases_total shrank: {report.eval_cases_total} < baseline {baseline.eval_cases_total}"
+            )
         if report.execution_accuracy + 1e-6 < baseline.execution_accuracy:
             failures.append(
                 f"execution_accuracy regressed: {report.execution_accuracy}% < baseline {baseline.execution_accuracy}%"
@@ -393,10 +397,25 @@ def read_repo_file(relative_path: str) -> str:
     return target.read_text(encoding="utf-8")
 
 
+_PROTECTED_AGENT_PATHS = {
+    "querity_team/baseline_metrics.json",
+    "querity_team/deterministic_nodes.py",
+    "querity_team/agent.py",
+    "querity_team/schemas.py",
+    "querity_team/seed_baseline.py",
+}
+
+
 def write_repo_file(relative_path: str, content: str) -> dict[str, Any]:
-    """Write or update a file inside the repository (blocks .env and .git)."""
+    """Write or update a file inside the repository (blocks .env, .git, and protected gate/baseline files)."""
     norm = relative_path.replace("\\", "/").lstrip("/")
-    if norm.startswith(".git") or norm.endswith(".env") or "/.env" in norm:
+    if (
+        norm.startswith(".git")
+        or norm.endswith(".env")
+        or "/.env" in norm
+        or norm in _PROTECTED_AGENT_PATHS
+        or norm.startswith("querity_team/tests/")
+    ):
         raise ValueError(f"Refusing to write protected path: {relative_path}")
     target = (REPO_ROOT / relative_path).resolve()
     if not str(target).startswith(str(REPO_ROOT.resolve())):

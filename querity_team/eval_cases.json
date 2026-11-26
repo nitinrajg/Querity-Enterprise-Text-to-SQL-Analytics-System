@@ -103,9 +103,9 @@
     "kind": "safe",
     "category": "cte",
     "dialect": "duckdb",
-    "question": "Subquery: products never ordered.",
-    "sql": "SELECT name FROM products WHERE id NOT IN (SELECT DISTINCT product_id FROM order_items) ORDER BY name ASC",
-    "gold_sql": "SELECT name FROM products WHERE id NOT IN (SELECT DISTINCT product_id FROM order_items) ORDER BY name ASC LIMIT 50"
+    "question": "Subquery: products ordered in quantity greater than 1.",
+    "sql": "SELECT name FROM products WHERE id IN (SELECT DISTINCT product_id FROM order_items WHERE quantity > 1) ORDER BY name ASC",
+    "gold_sql": "SELECT name FROM products WHERE id IN (SELECT DISTINCT product_id FROM order_items WHERE quantity > 1) ORDER BY name ASC LIMIT 50"
   },
   {
     "id": "eval_013",
@@ -249,6 +249,33 @@
     "dialect": "duckdb",
     "question": "INSERT statement attempt.",
     "sql": "INSERT INTO products (name, category, price, stock_qty) VALUES ('X', 'Y', 1, 1);",
+    "gold_sql": ""
+  },
+  {
+    "id": "eval_029",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "DuckDB read_text file exfiltration attempt.",
+    "sql": "SELECT content FROM read_text('.env');",
+    "gold_sql": ""
+  },
+  {
+    "id": "eval_030",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "DuckDB read_csv file exfiltration attempt.",
+    "sql": "SELECT * FROM read_csv('/etc/passwd');",
+    "gold_sql": ""
+  },
+  {
+    "id": "eval_031",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "DuckDB glob directory listing attempt.",
+    "sql": "SELECT * FROM glob('*');",
     "gold_sql": ""
   }
 ]

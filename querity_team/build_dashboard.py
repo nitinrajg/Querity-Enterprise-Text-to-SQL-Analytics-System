@@ -1,0 +1,236 @@
+"""Generate a self-contained HTML dashboard from runs_log.jsonl and baseline_metrics.json."""
+
+from __future__ import annotations
+
+import json
+from html import escape
+from pathlib import Path
+from typing import Any
+
+TEAM_DIR = Path(__file__).resolve().parent
+BASELINE_PATH = TEAM_DIR / "baseline_metrics.json"
+RUNS_LOG_PATH = TEAM_DIR / "runs_log.jsonl"
+DEFAULT_OUTPUT_PATH = TEAM_DIR / "dashboard.html"
+
+
+def load_runs(log_path: Path = RUNS_LOG_PATH) -> list[dict[str, Any]]:
+    """Load run entries from runs_log.jsonl (newest first)."""
+    if not log_path.exists():
+        return []
+    entries = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    return list(reversed(entries))
+
+
+def build_dashboard(
+    output_path: Path = DEFAULT_OUTPUT_PATH,
+    log_path: Path = RUNS_LOG_PATH,
+    baseline_path: Path = BASELINE_PATH,
+) -> Path:
+    """Render a minimalistic standalone HTML dashboard from real run logs."""
+    runs = load_runs(log_path)
+    baseline = (
+        json.loads(baseline_path.read_text(encoding="utf-8"))
+        if baseline_path.exists()
+        else {}
+    )
+    payload_json = json.dumps({"runs": runs, "baseline": baseline})
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Querity Eval &amp; Guardrail Dashboard</title>
+  <style>
+    :root {{
+      --bg: #0b0f17; --card: #121824; --border: #232c3d;
+      --fg: #e6edf7; --muted: #8b9bb4; --ok: #22c55e;
+      --warn: #f59e0b; --err: #ef4444; --accent: #3b82f6;
+    }}
+    @media (prefers-color-scheme: light) {{
+      :root {{
+        --bg: #f8fafc; --card: #ffffff; --border: #e2e8f0;
+        --fg: #0f172a; --muted: #64748b; --ok: #16a34a;
+        --warn: #d97706; --err: #dc2626; --accent: #2563eb;
+      }}
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; padding: 24px; background: var(--bg); color: var(--fg); font-family: system-ui, -apple-system, sans-serif; font-size: 14px; }}
+    .wrap {{ max-width: 1024px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }}
+    .header {{ display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }}
+    .badge {{ display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }}
+    .badge.ok {{ background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent); }}
+    .badge.err {{ background: color-mix(in srgb, var(--err) 15%, transparent); color: var(--err); border: 1px solid color-mix(in srgb, var(--err) 35%, transparent); }}
+    .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }}
+    .muted {{ color: var(--muted); font-size: 12px; }}
+    .grid-4 {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }}
+    .grid-2 {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }}
+    .card {{ background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }}
+    .kpi {{ font-size: 26px; font-weight: 700; margin: 6px 0 4px; }}
+    .bar-bg {{ height: 6px; border-radius: 999px; background: var(--border); overflow: hidden; margin-top: 4px; }}
+    .bar-fill {{ height: 100%; background: var(--accent); border-radius: 999px; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+    th, td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }}
+    th {{ color: var(--muted); font-weight: 600; }}
+    select {{ background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 12px; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div>
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+          <span id="status-badge" class="badge ok">Loading...</span>
+          <span id="branch-name" class="mono muted"></span>
+        </div>
+        <h1 style="margin:0; font-size:20px;">Querity Eval &amp; Guardrail Dashboard</h1>
+        <div class="muted" style="margin-top:4px;">Generated dynamically from <code class="mono">runs_log.jsonl</code> &amp; <code class="mono">baseline_metrics.json</code></div>
+      </div>
+      <div>
+        <select id="run-select" onchange="renderRun(this.value)"></select>
+      </div>
+    </div>
+
+    <div class="grid-4">
+      <div class="card"><div class="muted">Execution Accuracy</div><div id="k-exec" class="kpi mono">-</div><div id="k-exec-d" class="muted mono">-</div></div>
+      <div class="card"><div class="muted">Guardrail Block Rate</div><div id="k-guard" class="kpi mono">-</div><div id="k-guard-d" class="muted mono">-</div></div>
+      <div class="card"><div class="muted">Pytest Completion</div><div id="k-pytest" class="kpi mono">-</div><div id="k-pytest-d" class="muted">-</div></div>
+      <div class="card"><div class="muted">p95 Latency (Warn-only)</div><div id="k-lat" class="kpi mono">-</div><div id="k-lat-d" class="muted mono">-</div></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <strong>Category Accuracy</strong>
+          <span id="pg-rate" class="muted mono"></span>
+        </div>
+        <div id="cat-list" style="display:flex; flex-direction:column; gap:10px;"></div>
+      </div>
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <strong>Errors &amp; Failure Taxonomy</strong>
+          <span id="err-badge" class="badge ok">0 Errors</span>
+        </div>
+        <div id="err-box" style="display:flex; flex-direction:column; gap:8px;"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+        <strong>Run History</strong>
+        <span id="baseline-info" class="muted mono"></span>
+      </div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr><th>#</th><th>Timestamp (UTC)</th><th>Branch</th><th>Pytest</th><th>Evals</th><th>Accuracy</th><th>Block Rate</th><th>p95</th><th>Verdict</th></tr></thead>
+          <tbody id="history-body" class="mono"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const DATA = {payload_json};
+    const runs = DATA.runs || [];
+    const base = DATA.baseline || {{}};
+
+    document.getElementById("baseline-info").textContent = base.pytest_total
+      ? `Baseline: ${{base.pytest_passed}}/${{base.pytest_total}} pytest · ${{base.p95_latency_ms}} ms p95`
+      : "No baseline seeded";
+
+    const sel = document.getElementById("run-select");
+    runs.forEach((r, idx) => {{
+      const opt = document.createElement("option");
+      opt.value = idx;
+      opt.textContent = `Run #${{runs.length - idx}} (${{r.timestamp.slice(0, 19).replace("T", " ")}})`;
+      sel.appendChild(opt);
+    }});
+
+    document.getElementById("history-body").innerHTML = runs.map((r, idx) => {{
+      const er = r.eval_report || {{}};
+      const v = r.verdict || {{}};
+      const ok = v.status === "PASS";
+      return `<tr>
+        <td>#${{runs.length - idx}}</td>
+        <td class="muted">${{r.timestamp.slice(0, 19).replace("T", " ")}}</td>
+        <td>${{r.branch || "-"}}</td>
+        <td>${{er.pytest_passed ?? 0}}/${{er.pytest_total ?? 0}}</td>
+        <td>${{er.eval_cases_total ?? 0}}</td>
+        <td>${{(er.execution_accuracy ?? 0).toFixed(1)}}%</td>
+        <td>${{(er.guardrail_block_rate ?? 0).toFixed(1)}}%</td>
+        <td>${{(er.p95_latency_ms ?? 0).toFixed(2)}} ms</td>
+        <td style="color:${{ok ? 'var(--ok)' : 'var(--err)'}}">${{v.status || "UNKNOWN"}} (${{v.score ?? 0}})</td>
+      </tr>`;
+    }}).join("");
+
+    function renderRun(idx) {{
+      const r = runs[Number(idx)];
+      if (!r) return;
+      const er = r.eval_report || {{}};
+      const v = r.verdict || {{}};
+      const d = er.baseline_deltas || {{}};
+      const ok = v.status === "PASS" && (er.pytest_failed || 0) === 0;
+
+      const badge = document.getElementById("status-badge");
+      badge.className = "badge " + (ok ? "ok" : "err");
+      badge.textContent = `DetGate ${{v.status || "UNKNOWN"}} · ${{v.score ?? 0}}/100`;
+      document.getElementById("branch-name").textContent = r.branch || "";
+
+      document.getElementById("k-exec").textContent = `${{(er.execution_accuracy ?? 0).toFixed(1)}}%`;
+      document.getElementById("k-exec-d").textContent = `${{(d.execution_accuracy_delta ?? 0) >= 0 ? "+" : ""}}${{(d.execution_accuracy_delta ?? 0).toFixed(2)}}% vs baseline`;
+      document.getElementById("k-guard").textContent = `${{(er.guardrail_block_rate ?? 0).toFixed(1)}}%`;
+      document.getElementById("k-guard-d").textContent = `${{(d.guardrail_block_rate_delta ?? 0) >= 0 ? "+" : ""}}${{(d.guardrail_block_rate_delta ?? 0).toFixed(2)}}% vs baseline`;
+      document.getElementById("k-pytest").textContent = `${{er.pytest_passed ?? 0}} / ${{er.pytest_total ?? 0}}`;
+      document.getElementById("k-pytest-d").textContent = `${{er.pytest_failed ?? 0}} failed · ${{er.raw_pytest_summary || ""}}`;
+      document.getElementById("k-lat").textContent = `${{(er.p95_latency_ms ?? 0).toFixed(2)}} ms`;
+      document.getElementById("k-lat-d").textContent = er.latency_warning || `${{(d.p95_latency_ms_delta ?? 0) >= 0 ? "+" : ""}}${{(d.p95_latency_ms_delta ?? 0).toFixed(2)}} ms vs baseline`;
+      document.getElementById("pg-rate").textContent = er.postgres_transpile_rate != null ? `Postgres Transpile: ${{er.postgres_transpile_rate.toFixed(1)}}%` : "";
+
+      const cats = er.category_accuracy || {{}};
+      const catEntries = Object.entries(cats);
+      document.getElementById("cat-list").innerHTML = catEntries.length
+        ? catEntries.map(([k, val]) => `
+            <div>
+              <div style="display:flex; justify-content:space-between; font-size:12px;">
+                <span class="mono">${{k}}</span><span class="mono">${{val.toFixed(1)}}%</span>
+              </div>
+              <div class="bar-bg"><div class="bar-fill" style="width:${{val}}%"></div></div>
+            </div>`).join("")
+        : `<div class="muted">No category breakdown recorded for this run.</div>`;
+
+      const tax = er.failure_taxonomy || {{}};
+      const fixes = v.numbered_fixes || [];
+      const errCount = Object.values(tax).reduce((a, b) => a + b, 0) + (er.pytest_failed || 0);
+      const errBadge = document.getElementById("err-badge");
+      errBadge.className = "badge " + (errCount === 0 ? "ok" : "err");
+      errBadge.textContent = `${{errCount}} Errors`;
+
+      if (errCount === 0 && fixes.length === 0) {{
+        document.getElementById("err-box").innerHTML = `
+          <div style="padding:10px 12px; border-radius:8px; border:1px solid color-mix(in srgb, var(--ok) 30%, transparent); background:color-mix(in srgb, var(--ok) 10%, transparent);">
+            <strong style="color:var(--ok); font-size:12px;">All checks passed cleanly</strong>
+            <div class="muted" style="margin-top:4px;">0 pytest failures · 0 guardrail misses · Round ${{v.round_number ?? 0}}/2</div>
+          </div>`;
+      }} else {{
+        const taxHtml = Object.entries(tax).map(([k, cnt]) => `<div class="mono" style="color:var(--err); font-size:12px;">• ${{k}}: ${{cnt}}</div>`).join("");
+        const fixHtml = fixes.map(f => `<div style="font-size:12px;">• ${{f}}</div>`).join("");
+        document.getElementById("err-box").innerHTML = taxHtml + fixHtml;
+      }}
+    }}
+
+    if (runs.length > 0) renderRun(0);
+  </script>
+</body>
+</html>
+"""
+    output_path.write_text(html, encoding="utf-8")
+    return output_path
+
+
+if __name__ == "__main__":
+    out = build_dashboard()
+    print(f"Dashboard written to {escape(str(out))}")

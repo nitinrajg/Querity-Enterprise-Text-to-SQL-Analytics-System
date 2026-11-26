@@ -398,14 +398,10 @@ async def run_duckdb_playground_query(payload: DuckDBPlaygroundRequest):
     Executes a SQL query inside the high-performance DuckDB in-memory analytical engine.
     Supports SELECT, CTEs, WINDOW functions, PIVOT, SUMMARIZE, EXPLAIN, DESCRIBE, and more.
     """
-    # Allow DESCRIBE / EXPLAIN / SUMMARIZE / SHOW explicitly (DuckDB-specific meta commands)
-    first_token = payload.sql.strip().split()[0].upper() if payload.sql.strip() else ""
-    meta_commands = {"DESCRIBE", "EXPLAIN", "SUMMARIZE", "SHOW", "PRAGMA"}
-    if first_token not in meta_commands:
-        try:
-            payload.sql = validate_sql_safety(payload.sql)
-        except SQLSafetyError as exc:
-            raise HTTPException(status_code=400, detail=f"Query blocked by safety guard: {exc}")
+    try:
+        payload.sql = validate_sql_safety(payload.sql, allow_meta=True)
+    except SQLSafetyError as exc:
+        raise HTTPException(status_code=400, detail=f"Query blocked by safety guard: {exc}")
     try:
         result = execute_duckdb_sql(payload.sql, max_rows=payload.max_rows)
         return DuckDBPlaygroundResponse(**result)

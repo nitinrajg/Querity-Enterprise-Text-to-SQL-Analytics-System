@@ -20,8 +20,8 @@ import pyarrow as pa
 
 logger = logging.getLogger("text2sql")
 
-# Shared In-Memory DuckDB Connection
-_duckdb_conn = duckdb.connect(database=":memory:")
+# Shared In-Memory DuckDB Connection (external file/network access disabled)
+_duckdb_conn = duckdb.connect(database=":memory:", config={"enable_external_access": False})
 
 
 def _clean_val(val: Any) -> Any:
