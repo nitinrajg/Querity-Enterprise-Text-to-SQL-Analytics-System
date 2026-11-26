@@ -27,3 +27,8 @@ An isolated **Google ADK 2.x** graph workflow and Antigravity skill team that au
    # Offline deterministic Runner + DetGate + pytest:
    pytest backend/test_*.py querity_team/tests/ -v
    ```
+
+## Trust Boundary & Security Notes
+- When workspace edits exist, `guarded_runner_node` pauses for explicit human confirmation before running agent-written tests/code (`run.py` displays the diff and resumes the same ADK session upon confirmation; rejecting halts cleanly without retrying).
+- Subprocesses strip API secrets, DB credentials, `HOME`, `USERPROFILE`, and `VIRTUAL_ENV`, run `pytest --noconftest`, capture untrusted imports/stdout, use an ephemeral temp folder, verify per-case oracle results with dynamic per-run canaries in the parent process, and fingerprint protected files before and after runs.
+- **Note:** Local Python subprocesses still run under the host OS user account (not an OS container/VM), so always inspect the full diff before approving execution, and connect production PostgreSQL endpoints with a restricted read-only DB role.

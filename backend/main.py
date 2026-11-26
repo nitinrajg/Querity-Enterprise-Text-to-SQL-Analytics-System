@@ -92,6 +92,16 @@ app.add_middleware(
 )
 
 
+async def _fetch_public_table_names(pool: asyncpg.Pool) -> set[str]:
+    """Return active user table names in the public PostgreSQL schema."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_type = 'BASE TABLE';"
+        )
+    return {str(r["table_name"]) for r in rows if r.get("table_name")}
+
+
 # ---------------------------------------------------------------------------
 # Helper: check database connection
 # ---------------------------------------------------------------------------
@@ -317,12 +327,18 @@ async def run_query(payload: QueryRequest):
     pool = await require_db_pool()
     start = time.perf_counter()
 
-    # 1. Fetch live dynamic schema so Gemini always knows about all current tables
+    # 1. Fetch live dynamic schema so LLM always knows about all current tables
+    approved_tables: set[str] | None = None
     try:
-        live_schema, _ = await introspect_database_schema(pool)
+        live_schema, tables_meta = await introspect_database_schema(pool)
+        approved_tables = {t["name"] for t in tables_meta if isinstance(t, dict) and t.get("name")}
     except Exception as exc:
         logger.warning("Could not introspect live schema, falling back: %s", exc)
         live_schema = "Schema introspection unavailable."
+        try:
+            approved_tables = await _fetch_public_table_names(pool)
+        except Exception:
+            approved_tables = set()
 
     # 2. Generate SQL from the natural language question via NVIDIA API
     try:
@@ -334,9 +350,13 @@ async def run_query(payload: QueryRequest):
         logger.warning("NVIDIA generation failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Could not generate SQL: {exc}")
 
-    # 3. Validate the SQL is safe to run (read-only PostgreSQL query, ensure limit)
+    # 3. Validate the SQL is safe to run (read-only PostgreSQL query over approved tables)
     try:
-        generated_sql = validate_sql_safety(generated_sql, dialect="postgres")
+        generated_sql = validate_sql_safety(
+            generated_sql,
+            dialect="postgres",
+            allowed_tables=approved_tables,
+        )
     except SQLSafetyError as exc:
         logger.warning("Unsafe SQL blocked: %s", generated_sql)
         raise HTTPException(status_code=400, detail=f"Generated query was blocked: {exc}")
@@ -399,7 +419,12 @@ async def run_duckdb_playground_query(payload: DuckDBPlaygroundRequest):
     Supports SELECT, CTEs, WINDOW functions, PIVOT, SUMMARIZE, EXPLAIN, DESCRIBE, and more.
     """
     try:
-        payload.sql = validate_sql_safety(payload.sql, allow_meta=True)
+        duckdb_tables = {t["name"] for t in get_duckdb_tables_metadata() if t.get("name")}
+        payload.sql = validate_sql_safety(
+            payload.sql,
+            allow_meta=True,
+            allowed_tables=duckdb_tables,
+        )
     except SQLSafetyError as exc:
         raise HTTPException(status_code=400, detail=f"Query blocked by safety guard: {exc}")
     try:
@@ -452,7 +477,12 @@ async def run_playground_query(payload: PlaygroundRequest):
     start = time.perf_counter()
 
     try:
-        safe_sql = validate_sql_safety(payload.sql, dialect="postgres")
+        approved_tables = await _fetch_public_table_names(pool)
+        safe_sql = validate_sql_safety(
+            payload.sql,
+            dialect="postgres",
+            allowed_tables=approved_tables,
+        )
     except SQLSafetyError as exc:
         raise HTTPException(status_code=400, detail=f"Query blocked by safety guard: {exc}")
 

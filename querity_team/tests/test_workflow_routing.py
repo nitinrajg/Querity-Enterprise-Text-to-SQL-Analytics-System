@@ -260,9 +260,104 @@ def test_workflow_pauses_before_running_unapproved_code_edits(
     assert runner_executed == []
     assert calls.count("checker") == 0
     assert calls.count("lead") == 0
-    assert any(
-        ev.content
-        and ev.content.parts
-        and any(getattr(p, "function_call", None) and p.function_call.name == "adk_request_input" for p in ev.content.parts)
+    req_calls = [
+        p.function_call
         for ev in events
+        if ev.content and ev.content.parts
+        for p in ev.content.parts
+        if getattr(p, "function_call", None) and p.function_call.name == "adk_request_input"
+    ]
+    assert len(req_calls) == 1
+
+
+def _extract_interrupt_calls(events: list[Any]) -> list[types.FunctionCall]:
+    return [
+        p.function_call
+        for ev in events
+        if ev.content and ev.content.parts
+        for p in ev.content.parts
+        if getattr(p, "function_call", None) and p.function_call.name in {"adk_request_input", "adk_request_confirmation"}
+    ]
+
+
+def test_workflow_approval_resume_executes_and_finishes_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Answering confirmed=True resumes the same session, runs runner once, and reaches lead cleanly."""
+    calls = _setup_fake_workflow(
+        monkeypatch,
+        tmp_path,
+        checker_replies=['{"status": "PASS", "score": 100, "target_agent": "none", "numbered_fixes": [], "round_number": 0, "reason": "ok"}'],
+        gate_passes=True,
     )
+    monkeypatch.setattr(dn, "get_unapproved_workspace_changes", lambda _root=None: ["backend/sql_guard.py"])
+
+    runner_executed = []
+    monkeypatch.setattr(
+        dn,
+        "_run_pytest_targets",
+        lambda _targets, **_kw: (runner_executed.append(True), (5, 5, 0, "5 passed"))[1],
+    )
+
+    async def _go():
+        runner = InMemoryRunner(agent=agent_mod.root_agent, app_name="querity_test_approve")
+        session = await runner.session_service.create_session(app_name="querity_test_approve", user_id="u")
+        ev1 = [ev async for ev in runner.run_async(user_id="u", session_id=session.id, new_message=types.Content(role="user", parts=[types.Part(text="approve flow")]))]
+        reqs = _extract_interrupt_calls(ev1)
+        assert len(reqs) == 1
+        assert runner_executed == []
+        resume_msg = types.Content(
+            role="user",
+            parts=[types.Part(function_response=types.FunctionResponse(id=reqs[0].id, name=reqs[0].name, response={"confirmed": True}))],
+        )
+        ev2 = [ev async for ev in runner.run_async(user_id="u", session_id=session.id, new_message=resume_msg)]
+        return ev2
+
+    resumed_events = asyncio.run(_go())
+    assert resumed_events
+    assert len(runner_executed) == 1
+    assert calls.count("engineer") == 1
+    assert calls.count("checker") == 1
+    assert calls.count("lead") == 1
+
+
+def test_workflow_rejection_halts_cleanly_without_crashing_or_retrying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Answering confirmed=False must NOT run tests, must NOT crash on KeyError, and must NOT retry Engineer."""
+    calls = _setup_fake_workflow(
+        monkeypatch,
+        tmp_path,
+        checker_replies=['{"status": "PASS", "score": 100, "target_agent": "none", "numbered_fixes": [], "round_number": 0, "reason": "ok"}'],
+        gate_passes=True,
+    )
+    monkeypatch.setattr(dn, "get_unapproved_workspace_changes", lambda _root=None: ["backend/sql_guard.py"])
+
+    runner_executed = []
+    monkeypatch.setattr(
+        dn,
+        "_run_pytest_targets",
+        lambda _targets, **_kw: (runner_executed.append(True), (5, 5, 0, "5 passed"))[1],
+    )
+
+    async def _go():
+        runner = InMemoryRunner(agent=agent_mod.root_agent, app_name="querity_test_reject")
+        session = await runner.session_service.create_session(app_name="querity_test_reject", user_id="u")
+        ev1 = [ev async for ev in runner.run_async(user_id="u", session_id=session.id, new_message=types.Content(role="user", parts=[types.Part(text="reject flow")]))]
+        reqs = _extract_interrupt_calls(ev1)
+        assert len(reqs) == 1
+        resume_msg = types.Content(
+            role="user",
+            parts=[types.Part(function_response=types.FunctionResponse(id=reqs[0].id, name=reqs[0].name, response={"confirmed": False}))],
+        )
+        ev2 = [ev async for ev in runner.run_async(user_id="u", session_id=session.id, new_message=resume_msg)]
+        final_session = await runner.session_service.get_session(app_name="querity_test_reject", user_id="u", session_id=session.id)
+        return ev2, final_session
+
+    resumed_events, final_session = asyncio.run(_go())
+    assert resumed_events
+    assert runner_executed == []
+    assert calls.count("engineer") == 1
+    assert calls.count("checker") == 0
+    assert calls.count("lead") == 1
+    assert final_session.state.get("execution_rejected") is True

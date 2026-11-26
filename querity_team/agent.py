@@ -148,8 +148,9 @@ lead_agent = Agent(
         "JOB: Present the final Markdown Eval & PR Summary including Execution Accuracy %, SQL Syntax Validity %, "
         "Guardrail Block Rate %, p95 latency (with any warning), baseline_metrics.json deltas, failure taxonomy, "
         "and Checker verdict (including any round-2 escalation).\n"
-        "Pause for explicit 1-click user approval before calling git_pr_tool.\n"
-        "Always call log_run_event to record the run."
+        "If execution was rejected by the user (rejected/execution_rejected is True), summarize the clean halt "
+        "and do NOT invoke git_pr_tool.\n"
+        "Otherwise pause for explicit 1-click user approval before calling git_pr_tool, and call log_run_event to record the run."
     ),
     tools=[log_run_event, git_pr_tool],
     output_key="final_summary",

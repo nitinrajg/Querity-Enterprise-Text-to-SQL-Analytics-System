@@ -364,12 +364,16 @@ def test_sandboxed_grader_blocks_conftest_and_secret_access(
         "from pathlib import Path\n"
         "def test_no_secrets_and_no_real_baseline():\n"
         "    assert 'GEMINI_API_KEY' not in os.environ\n"
+        "    assert 'VIRTUAL_ENV' not in os.environ\n"
+        "    assert 'HOME' not in os.environ\n"
+        "    assert 'USERPROFILE' not in os.environ\n"
         "    assert not Path('.env').exists()\n"
         "    assert not Path('querity_team/baseline_metrics.json').exists()\n",
         encoding="utf-8",
     )
 
     monkeypatch.setenv("GEMINI_API_KEY", "SUPER_SECRET_ENV_VALUE")
+    monkeypatch.setenv("VIRTUAL_ENV", str(repo_copy / ".venv"))
     monkeypatch.setattr(dn, "REPO_ROOT", repo_copy)
     monkeypatch.setattr(dn, "get_unapproved_workspace_changes", lambda _r=None: ["backend/conftest.py"])
 
@@ -386,6 +390,79 @@ def test_sandboxed_grader_blocks_conftest_and_secret_access(
     assert "backend/conftest.py" in report.modified_exam_files
     # Real baseline file was never touched
     assert json.loads(baseline_file.read_text(encoding="utf-8"))["pytest_total"] == 1
+
+
+def test_forged_sql_guard_stdout_and_no_protection_caught_by_parent_oracle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Rogue sql_guard printing fake 100%-passing JSON and omitting checks must FAIL DetGate."""
+    import querity_team.deterministic_nodes as dn
+
+    repo_copy = tmp_path / "repo"
+    (repo_copy / "backend").mkdir(parents=True)
+    (repo_copy / "querity_team").mkdir(parents=True)
+    (repo_copy / "db").mkdir(parents=True)
+
+    real_repo = dn.REPO_ROOT
+    (repo_copy / "querity_team" / "__init__.py").write_text("", encoding="utf-8")
+    (repo_copy / "querity_team" / "schemas.py").write_text(
+        (real_repo / "querity_team" / "schemas.py").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (repo_copy / "db" / "schema.sql").write_text(
+        (real_repo / "db" / "schema.sql").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (repo_copy / "pytest.ini").write_text("[pytest]\npythonpath = .\n", encoding="utf-8")
+    (repo_copy / "backend" / "test_trivial.py").write_text("def test_ok(): pass\n", encoding="utf-8")
+
+    # Malicious sql_guard prints forged JSON summary AND does zero blocking
+    (repo_copy / "backend" / "sql_guard.py").write_text(
+        'import json\n'
+        'print(json.dumps({"eval_cases_total": 40, "safe_total": 1, "unsafe_total": 1, '
+        '"syntax_valid_count": 1, "exec_match_count": 1, "postgres_transpile_count": 1, '
+        '"guardrail_blocked_count": 1, "latencies_ms": [1.0], "taxonomy": {}, '
+        '"cat_totals": {}, "cat_passed": {}}))\n'
+        'class SQLSafetyError(Exception): pass\n'
+        'def validate_sql_safety(sql, default_limit=50, dialect="duckdb", allow_meta=False, allowed_tables=None):\n'
+        '    return sql\n',
+        encoding="utf-8",
+    )
+    baseline_file = repo_copy / "querity_team" / "baseline_metrics.json"
+    baseline_file.write_text(
+        BaselineMetrics(
+            seeded_at="2026-11-26T00:00:00Z",
+            pytest_total=1,
+            pytest_passed=1,
+            eval_cases_total=2,
+            execution_accuracy=100.0,
+            sql_syntax_validity=100.0,
+            guardrail_block_rate=100.0,
+            p95_latency_ms=10.0,
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+    eval_file = repo_copy / "querity_team" / "eval_cases.json"
+    eval_file.write_text(
+        json.dumps([
+            {"id": "s1", "kind": "safe", "category": "agg", "dialect": "duckdb", "question": "c", "sql": "SELECT COUNT(*) FROM products", "gold_sql": "SELECT COUNT(*) FROM products LIMIT 50"},
+            {"id": "u1", "kind": "unsafe", "category": "adv", "dialect": "duckdb", "question": "d", "sql": "DROP TABLE orders;", "gold_sql": ""},
+        ]),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(dn, "REPO_ROOT", repo_copy)
+    monkeypatch.setattr(dn, "get_unapproved_workspace_changes", lambda _r=None: ["backend/sql_guard.py"])
+
+    res = dn.run_benchmark_and_guardrails(
+        pytest_targets=["backend/test_trivial.py"],
+        eval_cases_path=eval_file,
+        baseline_path=baseline_file,
+        schema_path=repo_copy / "db" / "schema.sql",
+    )
+    report = EvalReport.model_validate(res["eval_report"])
+    assert report.guardrail_block_rate == 0.0
+    route, verdict, _ = evaluate_deterministic_gate(res, baseline_path=baseline_file)
+    assert verdict.status == "FAIL"
+    assert route == "retry_engineer"
 
 
 def test_git_pr_tool_enforces_hitl_confirmation():

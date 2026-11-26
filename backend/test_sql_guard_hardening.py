@@ -155,8 +155,28 @@ def test_postgres_dialect_preserves_to_char_format_and_main_uses_postgres():
     assert "TO_CHAR" in formatted.upper()
 
     main_src = (Path(__file__).parent / "main.py").read_text(encoding="utf-8")
-    assert 'validate_sql_safety(generated_sql, dialect="postgres")' in main_src
-    assert 'validate_sql_safety(payload.sql, dialect="postgres")' in main_src
+    assert 'allowed_tables=approved_tables' in main_src
+    assert 'dialect="postgres"' in main_src
+
+    with pytest.raises(SQLSafetyError, match="STRFTIME"):
+        validate_sql_safety("SELECT TO_CHAR(order_date, 'YYYY-MM') AS ym FROM orders", dialect="duckdb")
+
+
+def test_cte_scoping_prevents_outer_system_table_bypass():
+    """Inner CTE naming a system table must NEVER whitelist an outer reference to that system table."""
+    bypass_attempt = (
+        "SELECT * FROM pg_shadow "
+        "WHERE EXISTS (WITH pg_shadow AS (SELECT 1) SELECT * FROM pg_shadow)"
+    )
+    with pytest.raises(SQLSafetyError):
+        validate_sql_safety(bypass_attempt, dialect="postgres")
+
+    with pytest.raises(SQLSafetyError):
+        validate_sql_safety(
+            "SELECT * FROM pg_shadow WHERE id IN (WITH pg_shadow AS (SELECT 1 AS id) SELECT id FROM pg_shadow)",
+            dialect="postgres",
+            allowed_tables={"customers", "orders"},
+        )
 
 
 @pytest.mark.parametrize(

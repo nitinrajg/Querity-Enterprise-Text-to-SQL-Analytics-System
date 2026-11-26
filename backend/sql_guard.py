@@ -216,29 +216,65 @@ class SQLSafetyError(Exception):
     """Raised when a generated query fails a safety check."""
 
 
-def _check_tables(stmt: exp.Expression, allowed_tables: set[str] | None = None) -> None:
-    """Block system catalog tables/schemas (e.g. pg_shadow, information_schema) and optionally enforce table allowlist."""
-    cte_names = {
-        cte.alias_or_name.lower()
-        for cte in stmt.find_all(exp.CTE)
-        if getattr(cte, "alias_or_name", None)
-    }
-    normalized_allowlist = {t.lower() for t in allowed_tables} if allowed_tables is not None else None
+def _walk_tables_with_scope(
+    node: exp.Expression,
+    in_scope_ctes: frozenset[str],
+    normalized_allowlist: set[str] | None,
+) -> None:
+    """Recursively validate table references using lexical CTE scope only."""
+    if not isinstance(node, exp.Expression):
+        return
 
-    for table in stmt.find_all(exp.Table):
-        schema = (table.db or "").lower()
-        name = (table.name or "").lower()
+    with_clause = node.args.get("with_")
+    local_scope = set(in_scope_ctes)
+    if isinstance(with_clause, exp.With):
+        is_recursive = bool(with_clause.args.get("recursive"))
+        for cte in with_clause.expressions:
+            if isinstance(cte, exp.CTE):
+                cte_name = (cte.alias_or_name or "").lower()
+                if is_recursive and cte_name:
+                    local_scope.add(cte_name)
+                if cte.this is not None:
+                    _walk_tables_with_scope(cte.this, frozenset(local_scope), normalized_allowlist)
+                if cte_name:
+                    local_scope.add(cte_name)
+
+    next_scope = frozenset(local_scope)
+    if isinstance(node, exp.Table):
+        schema = (node.db or "").lower()
+        catalog = (getattr(node, "catalog", "") or "").lower()
+        name = (node.name or "").lower()
+        if catalog and (catalog in _BLOCKED_SYSTEM_SCHEMAS or catalog not in {"public", "main"}):
+            # Allow user catalog only when schema is explicit public/main and safe; block system catalogs
+            if catalog in _BLOCKED_SYSTEM_SCHEMAS:
+                raise SQLSafetyError(f"Access to catalog '{node.catalog}' is not allowed.")
         if schema:
             if schema in _BLOCKED_SYSTEM_SCHEMAS or schema not in {"public", "main"}:
-                raise SQLSafetyError(f"Access to schema '{table.db}' is not allowed.")
-        elif name in cte_names:
-            continue
+                raise SQLSafetyError(f"Access to schema '{node.db}' is not allowed.")
+        elif name in next_scope:
+            return
 
         if any(name.startswith(prefix) for prefix in _BLOCKED_TABLE_PREFIXES):
-            raise SQLSafetyError(f"Access to system table '{table.name}' is not allowed.")
+            raise SQLSafetyError(f"Access to system table '{node.name}' is not allowed.")
 
         if normalized_allowlist is not None and name not in normalized_allowlist:
-            raise SQLSafetyError(f"Table '{table.name}' is not in the allowed tables list.")
+            raise SQLSafetyError(f"Table '{node.name}' is not in the allowed tables list.")
+
+    for key, val in node.args.items():
+        if key == "with_":
+            continue
+        if isinstance(val, exp.Expression):
+            _walk_tables_with_scope(val, next_scope, normalized_allowlist)
+        elif isinstance(val, list):
+            for item in val:
+                if isinstance(item, exp.Expression):
+                    _walk_tables_with_scope(item, next_scope, normalized_allowlist)
+
+
+def _check_tables(stmt: exp.Expression, allowed_tables: set[str] | None = None) -> None:
+    """Block system catalog tables/schemas with proper lexical CTE scope and optional table allowlist."""
+    normalized_allowlist = {t.lower() for t in allowed_tables} if allowed_tables is not None else None
+    _walk_tables_with_scope(stmt, frozenset(), normalized_allowlist)
 
 
 def _check_allowed_functions(stmt: exp.Expression) -> None:
@@ -308,6 +344,14 @@ def validate_sql_safety(
     for node in stmt.walk():
         if isinstance(node, UNSAFE_AST_NODES):
             raise SQLSafetyError(f"Query contains a disallowed SQL operation: {type(node).__name__}")
+
+    if dialect.lower() == "duckdb":
+        for node in stmt.walk():
+            if isinstance(node, exp.ToChar):
+                raise SQLSafetyError(
+                    "TO_CHAR is PostgreSQL-specific and drops its format in DuckDB; "
+                    "use STRFTIME(col, fmt) for DuckDB or dialect='postgres'."
+                )
 
     _check_tables(stmt, allowed_tables=allowed_tables)
     _check_allowed_functions(stmt)

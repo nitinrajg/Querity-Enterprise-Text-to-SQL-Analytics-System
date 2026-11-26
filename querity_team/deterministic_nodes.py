@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import sqlglot
 from google.adk.events import Event, EventActions
 from google.adk.tools import ToolContext
@@ -120,125 +122,72 @@ _SANDBOX_SAFE_ENV_KEYS = (
     "LANG",
     "LC_ALL",
     "PYTHONIOENCODING",
-    "VIRTUAL_ENV",
-    "HOME",
-    "USERPROFILE",
 )
 
+# Child worker acts ONLY as a raw SQL validation oracle: stdout/stderr during untrusted import
+# and execution are redirected to a sink, and per-case outputs go to a temp file path on stdin.
+# Scoring, canary generation, DuckDB execution, and accuracy checks run ONLY in the parent.
 _EVAL_WORKER_SCRIPT = r"""
-import json, re, sys, time
+import contextlib, io, json, sys
 from pathlib import Path
-import duckdb
-import sqlglot
 
-sandbox_root = Path(sys.argv[1])
-eval_cases_path = Path(sys.argv[2])
-schema_path = Path(sys.argv[3])
+payload = json.loads(sys.stdin.read())
+sandbox_root = Path(payload["sandbox_root"])
+out_path = Path(payload["out_path"])
+cases = payload["cases"]
+
 sys.path.insert(0, str(sandbox_root / "backend"))
-from sql_guard import SQLSafetyError, validate_sql_safety
+_sink = io.StringIO()
+with contextlib.redirect_stdout(_sink), contextlib.redirect_stderr(_sink):
+    from sql_guard import SQLSafetyError, validate_sql_safety
 
-raw_sql_ddl = schema_path.read_text(encoding="utf-8")
-adapted = re.sub(r"\bDROP\s+TABLE\s+IF\s+EXISTS\s+(\w+)\s+CASCADE;", r"DROP TABLE IF EXISTS \1;", raw_sql_ddl, flags=re.IGNORECASE)
-adapted = re.sub(r"\bON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT)\b", "", adapted, flags=re.IGNORECASE)
-conn = duckdb.connect(":memory:", config={"enable_external_access": False})
-seq_idx = 0
-def _replace_serial(match):
-    global seq_idx
-    seq_idx += 1
-    seq_name = f"seq_serial_{seq_idx}"
-    conn.execute(f"CREATE SEQUENCE {seq_name} START 1;")
-    return f"INTEGER PRIMARY KEY DEFAULT nextval('{seq_name}')"
-adapted = re.sub(r"\bSERIAL\s+PRIMARY\s+KEY\b", _replace_serial, adapted, flags=re.IGNORECASE)
-for stmt in adapted.split(";"):
-    clean = stmt.strip()
-    if not clean:
-        continue
-    executable = "\n".join(ln for ln in clean.splitlines() if not ln.strip().startswith("--")).strip()
-    if executable:
-        conn.execute(executable)
-
-cases = json.loads(eval_cases_path.read_text(encoding="utf-8"))
-safe_cases = [c for c in cases if c.get("kind") == "safe"]
-unsafe_cases = [c for c in cases if c.get("kind") == "unsafe"]
-
-syntax_valid_count = 0
-exec_match_count = 0
-postgres_transpile_count = 0
-guardrail_blocked_count = 0
-latencies_ms = []
-taxonomy = {}
-cat_totals = {}
-cat_passed = {}
-
-for case in safe_cases:
-    t0 = time.perf_counter()
-    raw_sql = case["sql"]
-    gold_sql = case["gold_sql"]
+results = []
+for case in cases:
+    cid = case["id"]
     dialect = case.get("dialect", "duckdb")
-    cat = case.get("category", "general")
-    cat_totals[cat] = cat_totals.get(cat, 0) + 1
     try:
-        validated_sql = validate_sql_safety(raw_sql, dialect=dialect)
-    except SQLSafetyError:
-        taxonomy["guardrail_false_positive"] = taxonomy.get("guardrail_false_positive", 0) + 1
-        latencies_ms.append((time.perf_counter() - t0) * 1000.0)
-        continue
-    try:
-        sqlglot.parse_one(validated_sql, read=dialect)
-        syntax_valid_count += 1
-    except Exception:
-        taxonomy["dialect_syntax_error"] = taxonomy.get("dialect_syntax_error", 0) + 1
-        latencies_ms.append((time.perf_counter() - t0) * 1000.0)
-        continue
-    try:
-        sqlglot.transpile(validated_sql, read=dialect, write="postgres")
-        postgres_transpile_count += 1
-    except Exception:
-        taxonomy["postgres_transpile_error"] = taxonomy.get("postgres_transpile_error", 0) + 1
-    try:
-        actual_rows = conn.execute(validated_sql).fetchall()
-        gold_rows = conn.execute(gold_sql).fetchall()
-        if actual_rows == gold_rows:
-            exec_match_count += 1
-            cat_passed[cat] = cat_passed.get(cat, 0) + 1
-        else:
-            taxonomy["execution_mismatch"] = taxonomy.get("execution_mismatch", 0) + 1
-    except Exception:
-        taxonomy["execution_error"] = taxonomy.get("execution_error", 0) + 1
-    latencies_ms.append((time.perf_counter() - t0) * 1000.0)
+        with contextlib.redirect_stdout(_sink), contextlib.redirect_stderr(_sink):
+            validated = validate_sql_safety(case["sql"], dialect=dialect)
+        results.append({"id": cid, "status": "ok", "validated_sql": validated})
+    except SQLSafetyError as exc:
+        results.append({"id": cid, "status": "blocked", "error": str(exc)})
+    except Exception as exc:
+        results.append({"id": cid, "status": "error", "error": str(exc)})
 
-for case in unsafe_cases:
-    t0 = time.perf_counter()
-    cat = case.get("category", "adversarial")
-    dialect = case.get("dialect", "duckdb")
-    cat_totals[cat] = cat_totals.get(cat, 0) + 1
-    try:
-        validate_sql_safety(case["sql"], dialect=dialect)
-        taxonomy["guardrail_false_negative"] = taxonomy.get("guardrail_false_negative", 0) + 1
-    except SQLSafetyError:
-        guardrail_blocked_count += 1
-        cat_passed[cat] = cat_passed.get(cat, 0) + 1
-    latencies_ms.append((time.perf_counter() - t0) * 1000.0)
-
-conn.close()
-print(json.dumps({
-    "eval_cases_total": len(cases),
-    "safe_total": len(safe_cases),
-    "unsafe_total": len(unsafe_cases),
-    "syntax_valid_count": syntax_valid_count,
-    "exec_match_count": exec_match_count,
-    "postgres_transpile_count": postgres_transpile_count,
-    "guardrail_blocked_count": guardrail_blocked_count,
-    "latencies_ms": latencies_ms,
-    "taxonomy": taxonomy,
-    "cat_totals": cat_totals,
-    "cat_passed": cat_passed,
-}))
+out_path.write_text(json.dumps({"results": results}), encoding="utf-8")
 """
 
 
+def _load_duckdb_from_schema(schema_path: Path | None = None) -> duckdb.DuckDBPyConnection:
+    """Load db/schema.sql into an in-memory DuckDB connection for trusted parent-process grading."""
+    resolved = schema_path or SCHEMA_SQL_PATH
+    raw_sql = resolved.read_text(encoding="utf-8")
+    adapted = re.sub(r"\bDROP\s+TABLE\s+IF\s+EXISTS\s+(\w+)\s+CASCADE;", r"DROP TABLE IF EXISTS \1;", raw_sql, flags=re.IGNORECASE)
+    adapted = re.sub(r"\bON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT)\b", "", adapted, flags=re.IGNORECASE)
+
+    conn = duckdb.connect(":memory:", config={"enable_external_access": False})
+    seq_idx = 0
+
+    def _replace_serial(match: re.Match[str]) -> str:
+        nonlocal seq_idx
+        seq_idx += 1
+        seq_name = f"seq_serial_{seq_idx}"
+        conn.execute(f"CREATE SEQUENCE {seq_name} START 1;")
+        return f"INTEGER PRIMARY KEY DEFAULT nextval('{seq_name}')"
+
+    adapted = re.sub(r"\bSERIAL\s+PRIMARY\s+KEY\b", _replace_serial, adapted, flags=re.IGNORECASE)
+    for stmt in adapted.split(";"):
+        clean = stmt.strip()
+        if not clean:
+            continue
+        executable = "\n".join(ln for ln in clean.splitlines() if not ln.strip().startswith("--")).strip()
+        if executable:
+            conn.execute(executable)
+    return conn
+
+
 def _sanitized_sandbox_env(sandbox_root: Path) -> dict[str, str]:
-    """Build a minimal subprocess env stripped of all API secrets, tokens, and DB credentials."""
+    """Build a minimal subprocess env stripped of API secrets, tokens, DB credentials, HOME, and VIRTUAL_ENV."""
     env: dict[str, str] = {}
     for key in _SANDBOX_SAFE_ENV_KEYS:
         if key in os.environ:
@@ -297,6 +246,13 @@ def _prepare_grading_sandbox(
     return sandbox_cases, sandbox_schema
 
 
+def _fingerprint_protected_files(repo_root: Path) -> dict[Path, str | None]:
+    """Hash all protected repository files and .env before running untrusted code."""
+    exact, _, _ = _protected_paths(repo_root)
+    watched = set(exact) | {(repo_root / ".env").resolve()}
+    return {p: _sha256_or_none(p) for p in watched}
+
+
 def get_unapproved_workspace_changes(repo_root: Path | None = None) -> list[str]:
     """Return sorted relative paths of modified/untracked files relevant to code, tests, or evals."""
     root = repo_root or REPO_ROOT
@@ -337,7 +293,7 @@ def _run_pytest_targets(
     run_cwd = cwd or REPO_ROOT
     run_env = env if env is not None else _sanitized_sandbox_env(run_cwd)
     proc = subprocess.run(
-        [sys.executable, "-m", "pytest", "--noconftest", *targets, "-q", "--tb=short"],
+        [sys.executable, "-m", "pytest", "--noconftest", "-o", "addopts=", *targets, "-q", "--tb=short"],
         cwd=run_cwd,
         env=run_env,
         capture_output=True,
@@ -372,6 +328,118 @@ def _sha256_or_none(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
 
 
+def _grade_eval_cases_trusted(
+    cases: list[dict[str, Any]],
+    results_by_id: dict[str, dict[str, Any]],
+    schema_path: Path,
+    canary_safe_id: str,
+    canary_safe_val: int,
+    canary_unsafe_ids: tuple[str, str],
+) -> dict[str, Any]:
+    """Verify every individual case outcome in the trusted parent process using our own DuckDB + sqlglot."""
+    conn = _load_duckdb_from_schema(schema_path)
+
+    safe_cases = [c for c in cases if c.get("kind") == "safe"]
+    unsafe_cases = [c for c in cases if c.get("kind") == "unsafe"]
+
+    syntax_valid_count = 0
+    exec_match_count = 0
+    postgres_transpile_count = 0
+    guardrail_blocked_count = 0
+    latencies_ms: list[float] = []
+    taxonomy: dict[str, int] = {}
+    cat_totals: dict[str, int] = {}
+    cat_passed: dict[str, int] = {}
+
+    c_safe_res = results_by_id.get(canary_safe_id)
+    if not c_safe_res or c_safe_res.get("status") != "ok":
+        taxonomy["canary_safe_failed"] = 1
+    else:
+        try:
+            canary_rows = conn.execute(str(c_safe_res.get("validated_sql", ""))).fetchall()
+            if canary_rows != [(1, canary_safe_val)]:
+                taxonomy["canary_safe_mismatch"] = 1
+        except Exception:
+            taxonomy["canary_safe_error"] = 1
+
+    for cid in canary_unsafe_ids:
+        c_res = results_by_id.get(cid)
+        if not c_res or c_res.get("status") != "blocked":
+            taxonomy["canary_unsafe_bypassed"] = taxonomy.get("canary_unsafe_bypassed", 0) + 1
+
+    from sqlglot import exp as _exp
+
+    for case in safe_cases:
+        t0 = time.perf_counter()
+        cid = case["id"]
+        dialect = case.get("dialect", "duckdb")
+        cat = case.get("category", "general")
+        cat_totals[cat] = cat_totals.get(cat, 0) + 1
+        res = results_by_id.get(cid)
+        if not res or res.get("status") != "ok":
+            taxonomy["guardrail_false_positive"] = taxonomy.get("guardrail_false_positive", 0) + 1
+            latencies_ms.append((time.perf_counter() - t0) * 1000.0)
+            continue
+
+        validated_sql = str(res.get("validated_sql", ""))
+        try:
+            parsed = sqlglot.parse_one(validated_sql, read=dialect)
+            if not isinstance(parsed, (_exp.Select, _exp.Union, _exp.Intersect, _exp.Except)):
+                raise ValueError("Non-read-only SQL returned by guard")
+            syntax_valid_count += 1
+        except Exception:
+            taxonomy["dialect_syntax_error"] = taxonomy.get("dialect_syntax_error", 0) + 1
+            latencies_ms.append((time.perf_counter() - t0) * 1000.0)
+            continue
+
+        try:
+            sqlglot.transpile(validated_sql, read=dialect, write="postgres")
+            postgres_transpile_count += 1
+        except Exception:
+            taxonomy["postgres_transpile_error"] = taxonomy.get("postgres_transpile_error", 0) + 1
+
+        try:
+            actual_rows = conn.execute(validated_sql).fetchall()
+            gold_rows = conn.execute(case["gold_sql"]).fetchall()
+            if actual_rows == gold_rows:
+                exec_match_count += 1
+                cat_passed[cat] = cat_passed.get(cat, 0) + 1
+            else:
+                taxonomy["execution_mismatch"] = taxonomy.get("execution_mismatch", 0) + 1
+        except Exception:
+            taxonomy["execution_error"] = taxonomy.get("execution_error", 0) + 1
+        latencies_ms.append((time.perf_counter() - t0) * 1000.0)
+
+    for case in unsafe_cases:
+        t0 = time.perf_counter()
+        cid = case["id"]
+        cat = case.get("category", "adversarial")
+        cat_totals[cat] = cat_totals.get(cat, 0) + 1
+        res = results_by_id.get(cid)
+        if res and res.get("status") == "blocked":
+            guardrail_blocked_count += 1
+            cat_passed[cat] = cat_passed.get(cat, 0) + 1
+        else:
+            taxonomy["guardrail_false_negative"] = taxonomy.get("guardrail_false_negative", 0) + 1
+        latencies_ms.append((time.perf_counter() - t0) * 1000.0)
+
+    conn.close()
+
+    exec_acc = 0.0 if (taxonomy.get("canary_safe_failed") or taxonomy.get("canary_safe_mismatch") or taxonomy.get("canary_safe_error")) else round((exec_match_count / len(safe_cases) * 100.0) if safe_cases else 100.0, 2)
+    block_rate = 0.0 if taxonomy.get("canary_unsafe_bypassed") else round((guardrail_blocked_count / len(unsafe_cases) * 100.0) if unsafe_cases else 100.0, 2)
+
+    return {
+        "eval_cases_total": len(cases),
+        "syntax_val": round((syntax_valid_count / len(safe_cases) * 100.0) if safe_cases else 100.0, 2),
+        "exec_acc": exec_acc,
+        "pg_rate": round((postgres_transpile_count / len(safe_cases) * 100.0) if safe_cases else 100.0, 2),
+        "block_rate": block_rate,
+        "category_accuracy": {k: round(cat_passed.get(k, 0) / total * 100.0, 2) for k, total in sorted(cat_totals.items())},
+        "p95_ms": _percentile(latencies_ms, 95.0),
+        "taxonomy": taxonomy,
+    }
+
+
 def run_benchmark_and_guardrails(
     node_input: Any = None,
     pytest_targets: list[str] | None = None,
@@ -380,7 +448,7 @@ def run_benchmark_and_guardrails(
     schema_path: Path | None = None,
     round_number: int = 0,
 ) -> dict[str, Any]:
-    """Deterministic Python node: runs pytest and DuckDB/sqlglot evals inside a secret-free temp sandbox."""
+    """Deterministic Python node: runs pytest in temp sandbox and grades per-case oracle results in parent."""
     targets = pytest_targets if pytest_targets is not None else _discover_pytest_targets(REPO_ROOT)
     cases_file = eval_cases_path or EVAL_CASES_PATH
     resolved_baseline = baseline_path or BASELINE_PATH
@@ -388,10 +456,38 @@ def run_benchmark_and_guardrails(
 
     baseline = load_baseline_metrics(resolved_baseline)
     pre_baseline_hash = _sha256_or_none(resolved_baseline)
+    pre_protected_hashes = _fingerprint_protected_files(REPO_ROOT)
+
+    cases: list[dict[str, Any]] = json.loads(cases_file.read_text(encoding="utf-8"))
+    canary_safe_val = secrets.randbelow(90000) + 10000
+    canary_safe_id = f"canary_safe_{secrets.token_hex(6)}"
+    canary_unsafe_dml_id = f"canary_unsafe_dml_{secrets.token_hex(6)}"
+    canary_unsafe_fn_id = f"canary_unsafe_fn_{secrets.token_hex(6)}"
+    worker_cases = [
+        *cases,
+        {
+            "id": canary_safe_id,
+            "kind": "safe",
+            "dialect": "duckdb",
+            "sql": f"SELECT id, {canary_safe_val} AS canary_val FROM customers ORDER BY id ASC LIMIT 1",
+        },
+        {
+            "id": canary_unsafe_dml_id,
+            "kind": "unsafe",
+            "dialect": "duckdb",
+            "sql": f"DELETE FROM customers WHERE id = {canary_safe_val};",
+        },
+        {
+            "id": canary_unsafe_fn_id,
+            "kind": "unsafe",
+            "dialect": "postgres",
+            "sql": f"SELECT pg_sleep({canary_safe_val % 9 + 1});",
+        },
+    ]
 
     with tempfile.TemporaryDirectory(prefix="querity_sandbox_") as tmp_dir_str:
         sandbox_root = Path(tmp_dir_str)
-        sandbox_cases, sandbox_schema = _prepare_grading_sandbox(
+        _sandbox_cases, _sandbox_schema = _prepare_grading_sandbox(
             sandbox_root, REPO_ROOT, cases_file, resolved_schema, targets
         )
         sanitized_env = _sanitized_sandbox_env(sandbox_root)
@@ -400,52 +496,58 @@ def run_benchmark_and_guardrails(
             targets, cwd=sandbox_root, env=sanitized_env
         )
 
+        out_results_path = sandbox_root / f"_oracle_{secrets.token_hex(8)}.json"
+        worker_payload = json.dumps({
+            "sandbox_root": str(sandbox_root),
+            "out_path": str(out_results_path),
+            "cases": worker_cases,
+        })
         worker_proc = subprocess.run(
-            [sys.executable, "-c", _EVAL_WORKER_SCRIPT, str(sandbox_root), str(sandbox_cases), str(sandbox_schema)],
+            [sys.executable, "-c", _EVAL_WORKER_SCRIPT],
+            input=worker_payload,
             cwd=sandbox_root,
             env=sanitized_env,
             capture_output=True,
             text=True,
-            check=True,
         )
-        metrics = json.loads(worker_proc.stdout.strip().splitlines()[-1])
+        if worker_proc.returncode == 0 and out_results_path.exists():
+            raw_items = json.loads(out_results_path.read_text(encoding="utf-8")).get("results", [])
+            results_by_id = {
+                str(item["id"]): item
+                for item in raw_items
+                if isinstance(item, dict) and "id" in item
+            }
+        else:
+            results_by_id = {}
 
     post_baseline_hash = _sha256_or_none(resolved_baseline)
-    if post_baseline_hash != pre_baseline_hash:
-        raise RuntimeError("Grading integrity error: baseline_metrics.json was modified during evaluation.")
+    post_protected_hashes = _fingerprint_protected_files(REPO_ROOT)
+    if post_baseline_hash != pre_baseline_hash or post_protected_hashes != pre_protected_hashes:
+        raise RuntimeError(
+            "Sandbox integrity violation: protected repository file or baseline modified during evaluation."
+        )
 
-    safe_total = int(metrics["safe_total"])
-    unsafe_total = int(metrics["unsafe_total"])
-    syntax_valid_count = int(metrics["syntax_valid_count"])
-    exec_match_count = int(metrics["exec_match_count"])
-    postgres_transpile_count = int(metrics["postgres_transpile_count"])
-    guardrail_blocked_count = int(metrics["guardrail_blocked_count"])
-    latencies_ms = [float(x) for x in metrics["latencies_ms"]]
-    taxonomy = dict(metrics["taxonomy"])
-    cat_totals = dict(metrics["cat_totals"])
-    cat_passed = dict(metrics["cat_passed"])
-
-    exec_acc = round((exec_match_count / safe_total * 100.0) if safe_total else 100.0, 2)
-    syntax_val = round((syntax_valid_count / safe_total * 100.0) if safe_total else 100.0, 2)
-    block_rate = round((guardrail_blocked_count / unsafe_total * 100.0) if unsafe_total else 100.0, 2)
-    pg_rate = round((postgres_transpile_count / safe_total * 100.0) if safe_total else 100.0, 2)
-    category_accuracy = {
-        k: round(cat_passed.get(k, 0) / total * 100.0, 2) for k, total in sorted(cat_totals.items())
-    }
-    p95_ms = _percentile(latencies_ms, 95.0)
+    graded = _grade_eval_cases_trusted(
+        cases=cases,
+        results_by_id=results_by_id,
+        schema_path=resolved_schema,
+        canary_safe_id=canary_safe_id,
+        canary_safe_val=canary_safe_val,
+        canary_unsafe_ids=(canary_unsafe_dml_id, canary_unsafe_fn_id),
+    )
 
     deltas = MetricDeltas()
     latency_warning: str | None = None
     if baseline is not None:
         deltas = MetricDeltas(
-            execution_accuracy_delta=round(exec_acc - baseline.execution_accuracy, 2),
-            sql_syntax_validity_delta=round(syntax_val - baseline.sql_syntax_validity, 2),
-            guardrail_block_rate_delta=round(block_rate - baseline.guardrail_block_rate, 2),
-            p95_latency_ms_delta=round(p95_ms - baseline.p95_latency_ms, 3),
+            execution_accuracy_delta=round(graded["exec_acc"] - baseline.execution_accuracy, 2),
+            sql_syntax_validity_delta=round(graded["syntax_val"] - baseline.sql_syntax_validity, 2),
+            guardrail_block_rate_delta=round(graded["block_rate"] - baseline.guardrail_block_rate, 2),
+            p95_latency_ms_delta=round(graded["p95_ms"] - baseline.p95_latency_ms, 3),
         )
-        if baseline.p95_latency_ms > 0 and p95_ms > baseline.p95_latency_ms * 1.25:
+        if baseline.p95_latency_ms > 0 and graded["p95_ms"] > baseline.p95_latency_ms * 1.25:
             latency_warning = (
-                f"Warning: p95 latency {p95_ms}ms exceeded baseline "
+                f"Warning: p95 latency {graded['p95_ms']}ms exceeded baseline "
                 f"{baseline.p95_latency_ms}ms by >25% (warning-only; no FAIL triggered)."
             )
 
@@ -456,14 +558,14 @@ def run_benchmark_and_guardrails(
         pytest_total=pytest_total,
         pytest_passed=pytest_passed,
         pytest_failed=pytest_failed,
-        eval_cases_total=int(metrics["eval_cases_total"]),
-        execution_accuracy=exec_acc,
-        sql_syntax_validity=syntax_val,
-        guardrail_block_rate=block_rate,
-        postgres_transpile_rate=pg_rate,
-        category_accuracy=category_accuracy,
-        p95_latency_ms=p95_ms,
-        failure_taxonomy=taxonomy,
+        eval_cases_total=int(graded["eval_cases_total"]),
+        execution_accuracy=graded["exec_acc"],
+        sql_syntax_validity=graded["syntax_val"],
+        guardrail_block_rate=graded["block_rate"],
+        postgres_transpile_rate=graded["pg_rate"],
+        category_accuracy=graded["category_accuracy"],
+        p95_latency_ms=graded["p95_ms"],
+        failure_taxonomy=graded["taxonomy"],
         baseline_deltas=deltas,
         latency_warning=latency_warning,
         raw_pytest_summary=pytest_summary,
@@ -550,13 +652,49 @@ def evaluate_deterministic_gate(
 
 
 def deterministic_gate_node(node_input: dict[str, Any], round_number: int = 0) -> Event:
-    """ADK Workflow router node wrapping evaluate_deterministic_gate."""
-    effective_round = (
-        int(node_input.get("round_number", round_number))
-        if isinstance(node_input, dict)
-        else int(round_number or 0)
-    )
-    payload = {**(node_input if isinstance(node_input, dict) else {}), "round_number": effective_round}
+    """ADK Workflow router node wrapping evaluate_deterministic_gate.
+
+    If pre-execution human approval was rejected (node_input lacks 'eval_report'),
+    halt cleanly by routing to 'escalate' (Lead) without retrying Engineer.
+    """
+    current_round = int(round_number or 0)
+    if not isinstance(node_input, dict) or "eval_report" not in node_input:
+        reason = (
+            str(node_input.get("error", ""))
+            if isinstance(node_input, dict) and node_input.get("error")
+            else "Execution rejected or missing EvalReport; stopping cleanly without retry."
+        )
+        verdict = CheckerVerdict(
+            status="FAIL",
+            score=0,
+            target_agent="none",
+            numbered_fixes=[reason],
+            round_number=min(2, current_round),
+            reason=reason,
+        )
+        modified_files = get_unapproved_workspace_changes(REPO_ROOT)
+        out = {
+            "rejected": True,
+            "det_verdict": verdict.model_dump(),
+            "round_number": current_round,
+            "requires_human_review": True,
+            "modified_exam_files": modified_files,
+        }
+        return Event(
+            output=out,
+            actions=EventActions(
+                route="escalate",
+                state_delta={
+                    "execution_rejected": True,
+                    "det_verdict": verdict.model_dump(),
+                    "requires_human_review": True,
+                    "modified_exam_files": modified_files,
+                },
+            ),
+        )
+
+    effective_round = int(node_input.get("round_number", current_round))
+    payload = {**node_input, "round_number": effective_round}
     route, verdict, next_round = evaluate_deterministic_gate(payload)
     eval_report = payload["eval_report"]
     requires_review = bool(eval_report.get("requires_human_review", False))
@@ -573,6 +711,7 @@ def deterministic_gate_node(node_input: dict[str, Any], round_number: int = 0) -
         actions=EventActions(
             route=route,
             state_delta={
+                "execution_rejected": False,
                 "round_number": next_round,
                 "eval_report": eval_report,
                 "requires_human_review": requires_review,
@@ -750,6 +889,13 @@ def git_pr_tool(
             "status": "blocked_requires_human_approval",
             "action": action,
             "message": "Explicit HITL ToolContext confirmation is required before commit or PR creation.",
+        }
+
+    if isinstance(tool_context.state, dict) and tool_context.state.get("execution_rejected"):
+        return {
+            "status": "blocked_execution_rejected",
+            "action": action,
+            "message": "Workflow execution was rejected by the user; commit and PR creation are disabled.",
         }
 
     eval_report = tool_context.state.get("eval_report", {}) if isinstance(tool_context.state, dict) else {}
