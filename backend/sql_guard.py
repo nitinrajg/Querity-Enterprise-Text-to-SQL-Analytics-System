@@ -1,58 +1,82 @@
 """
 Guards against unsafe generated SQL before it ever touches the database.
 
-This is a defense-in-depth layer. The primary safety mechanism is running
-queries through a read-only DB transaction/role — this module is the first
-line of defense so we fail fast with a clear error instead of relying on
-the database to reject a destructive statement.
+Uses sqlglot AST parsing so string literals containing blocked words,
+semicolons, or comment markers are not false-flagged, while stacked queries,
+non-SELECT/UNION root statements, and unsafe AST nodes are strictly blocked.
 """
 
-import re
+from __future__ import annotations
 
-# Statements that should never appear in a text-to-SQL demo — this is a
-# read-only query tool, so anything beyond SELECT is out of scope.
-BLOCKED_KEYWORDS = [
-    "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE",
-    "CREATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "CALL",
-    "COPY", "VACUUM", "REINDEX",
-]
+import sqlglot
+from sqlglot import exp
+from sqlglot.errors import ParseError
 
 MAX_QUERY_LENGTH = 2000
+
+_UNSAFE_NODE_NAMES = (
+    "Insert",
+    "Update",
+    "Delete",
+    "Drop",
+    "Create",
+    "Alter",
+    "TruncateTable",
+    "Command",
+    "Copy",
+    "Pragma",
+    "Grant",
+    "Revoke",
+    "Set",
+    "Use",
+    "Attach",
+    "Detach",
+    "Transaction",
+    "Commit",
+    "Rollback",
+)
+UNSAFE_AST_NODES = tuple(
+    cls for name in _UNSAFE_NODE_NAMES if (cls := getattr(exp, name, None)) is not None
+)
 
 
 class SQLSafetyError(Exception):
     """Raised when a generated query fails a safety check."""
 
 
-def validate_sql_safety(sql: str, default_limit: int = 50) -> str:
+def validate_sql_safety(sql: str, default_limit: int = 50, dialect: str = "duckdb") -> str:
     """
-    Validates that the SQL is a safe, single, read-only statement.
-    Defensively attaches a LIMIT clause if the LLM omitted one.
+    Validates via sqlglot AST that the SQL is a single, safe, read-only query.
+    Defensively attaches a LIMIT clause if the query omitted one.
     Returns the validated SQL query string.
     """
     if not sql or not sql.strip():
         raise SQLSafetyError("Generated SQL was empty.")
 
-    cleaned = sql.strip().rstrip(";")
-
-    if len(cleaned) > MAX_QUERY_LENGTH:
+    raw = sql.strip()
+    if len(raw) > MAX_QUERY_LENGTH:
         raise SQLSafetyError("Generated SQL exceeds the maximum allowed length.")
 
-    # Reject multiple statements (stacked queries) — a classic injection vector
-    if ";" in cleaned:
+    try:
+        statements = [s for s in sqlglot.parse(raw, read=dialect) if s is not None]
+    except ParseError as exc:
+        raise SQLSafetyError(f"SQL syntax parse error: {exc}") from exc
+
+    if not statements:
+        raise SQLSafetyError("Generated SQL was empty.")
+
+    if len(statements) != 1:
         raise SQLSafetyError("Multiple SQL statements are not allowed.")
 
-    if not re.match(r"^\s*(SELECT|WITH)\s", cleaned, re.IGNORECASE):
+    stmt = statements[0]
+    if not isinstance(stmt, (exp.Select, exp.Union)):
         raise SQLSafetyError("Only SELECT queries are allowed.")
 
-    upper_sql = cleaned.upper()
-    for keyword in BLOCKED_KEYWORDS:
-        # Match as a whole word to avoid false positives (e.g. "created_at" containing "CREATE")
-        if re.search(rf"\b{keyword}\b", upper_sql):
-            raise SQLSafetyError(f"Query contains a disallowed keyword: {keyword}")
+    for node in stmt.walk():
+        if isinstance(node, UNSAFE_AST_NODES):
+            raise SQLSafetyError(f"Query contains a disallowed SQL operation: {type(node).__name__}")
 
-    # If LIMIT was omitted by the model, defensively append it
-    if not re.search(r"\bLIMIT\b", cleaned, re.IGNORECASE):
-        cleaned = f"{cleaned} LIMIT {default_limit}"
+    if stmt.args.get("limit") is None:
+        stmt = stmt.limit(default_limit)
 
-    return f"{cleaned};"
+    return f"{stmt.sql(dialect=dialect)};"
