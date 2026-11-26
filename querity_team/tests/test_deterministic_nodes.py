@@ -144,42 +144,119 @@ def test_write_repo_file_blocks_path_traversal():
 def test_checker_router_state_round_enforced():
     """checker_router must use the state round_number, not the model's self-reported value.
 
-    When bad JSON arrives but state says round >= 2, we must escalate to lead_hitl
-    (not loop back to retry_engineer).
+    When bad JSON arrives or FAIL JSON omits/spoofs round_number=0, the authoritative
+    state parameter round_number must still enforce the max 2 retry limit.
     """
     from querity_team.agent import checker_router
 
-    # Simulate: state says round=2 (maximum), but checker returned garbage
-    bad_input = {"round_number": 2, "checker_output": "not json at all"}
-    event = checker_router(bad_input)
+    # Simulate: state says round=2 (maximum), but checker returned garbage plain text
+    event = checker_router("not json at all", round_number=2)
     assert event.actions.route == "lead_hitl", (
         f"Expected lead_hitl escalation at round 2, got {event.actions.route}"
     )
 
     # Simulate: state says round=0, checker returned valid FAIL -> should retry
-    fail_input = {
-        "round_number": 0,
-        "checker_output": '{"status": "FAIL", "score": 3, "target_agent": "engineer",'
-        ' "numbered_fixes": ["fix this"], "reason": "too slow"}',
-    }
-    event2 = checker_router(fail_input)
+    fail_reply = (
+        '{"status": "FAIL", "score": 3, "target_agent": "engineer",'
+        ' "numbered_fixes": ["fix this"], "round_number": 0, "reason": "too slow"}'
+    )
+    event2 = checker_router(fail_reply, round_number=0)
     assert event2.actions.route in ("retry_engineer", "retry_analyst"), (
         f"Expected retry at round 0, got {event2.actions.route}"
     )
     assert event2.actions.state_delta["round_number"] == 1, "state_delta must increment round"
 
-    # Simulate: state says round=1, checker returns FAIL -> should retry (round becomes 2)
-    fail_input2 = {**fail_input, "round_number": 1}
-    event3 = checker_router(fail_input2)
+    # Simulate: state says round=1, checker returns FAIL (even trying to spoof round_number=0) -> round becomes 2
+    event3 = checker_router(fail_reply, round_number=1)
     assert event3.actions.route in ("retry_engineer", "retry_analyst")
     assert event3.actions.state_delta["round_number"] == 2
 
-    # Simulate: state says round=2, checker returns FAIL -> must escalate
-    fail_input3 = {**fail_input, "round_number": 2}
-    event4 = checker_router(fail_input3)
+    # Simulate: state says round=2, checker returns FAIL (even trying to spoof round_number=0) -> must escalate
+    event4 = checker_router(fail_reply, round_number=2)
     assert event4.actions.route == "lead_hitl", (
         f"Expected lead_hitl at round cap, got {event4.actions.route}"
     )
+
+
+def test_write_and_read_block_sibling_folder_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Sibling prefix folder (e.g. copy/ trying to access ../copy-evil/x) must be blocked by is_relative_to."""
+    import querity_team.deterministic_nodes as dn
+
+    repo_copy = tmp_path / "copy"
+    (repo_copy / "backend").mkdir(parents=True)
+    sibling_evil = tmp_path / "copy-evil"
+    sibling_evil.mkdir(parents=True)
+    (sibling_evil / "secret.txt").write_text("TOP_SECRET", encoding="utf-8")
+
+    monkeypatch.setattr(dn, "REPO_ROOT", repo_copy)
+
+    with pytest.raises(ValueError, match="outside repository root"):
+        dn.write_repo_file("../copy-evil/x.py", "# pwned")
+
+    with pytest.raises(ValueError, match="outside repository root"):
+        dn.read_repo_file("../copy-evil/secret.txt")
+
+
+def test_write_repo_file_blocks_pytest_ini_tests_and_non_allowlisted_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Engineer cannot edit pytest.ini, CI, baseline tests, frontend, or mutate existing eval cases."""
+    import querity_team.deterministic_nodes as dn
+
+    repo_copy = tmp_path / "repo"
+    (repo_copy / "backend").mkdir(parents=True)
+    (repo_copy / "querity_team" / "tests").mkdir(parents=True)
+    (repo_copy / "frontend").mkdir(parents=True)
+    (repo_copy / ".github" / "workflows").mkdir(parents=True)
+    (repo_copy / "pytest.ini").write_text("[pytest]\npythonpath = .\n", encoding="utf-8")
+    (repo_copy / "backend" / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    (repo_copy / "backend" / "test_sql_guard_hardening.py").write_text("def test_ok(): pass\n", encoding="utf-8")
+    (repo_copy / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    (repo_copy / ".env.example").write_text("SECRET=\n", encoding="utf-8")
+    eval_file = repo_copy / "querity_team" / "eval_cases.json"
+    eval_file.write_text(
+        json.dumps([{"id": "eval_001", "kind": "safe", "dialect": "duckdb", "sql": "SELECT 1", "gold_sql": "SELECT 1"}]),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(dn, "REPO_ROOT", repo_copy)
+
+    for forbidden in (
+        "pytest.ini",
+        ".github/workflows/eval-ci.yml",
+        "backend/requirements.txt",
+        "backend/test_sql_guard_hardening.py",
+        "frontend/index.html",
+        ".env",
+        "querity_team/baseline_metrics.json",
+        "querity_team/tests/test_deterministic_nodes.py",
+    ):
+        with pytest.raises(ValueError, match="protected"):
+            dn.write_repo_file(forbidden, "x")
+
+    # Replacing or deleting an existing eval case must be blocked
+    with pytest.raises(ValueError, match="protected"):
+        dn.write_repo_file(
+            "querity_team/eval_cases.json",
+            json.dumps([{"id": "eval_001", "kind": "safe", "dialect": "duckdb", "sql": "SELECT 999", "gold_sql": "SELECT 999"}]),
+        )
+
+    # Reading .env must be blocked, while .env.example is readable
+    with pytest.raises(ValueError, match="protected"):
+        dn.read_repo_file(".env")
+    assert "SECRET=" in dn.read_repo_file(".env.example")
+
+    # Appending a new eval case and writing a new regression test file must work
+    res1 = dn.write_repo_file(
+        "querity_team/eval_cases.json",
+        json.dumps([
+            {"id": "eval_001", "kind": "safe", "dialect": "duckdb", "sql": "SELECT 1", "gold_sql": "SELECT 1"},
+            {"id": "eval_002", "kind": "unsafe", "dialect": "postgres", "sql": "SELECT pg_sleep(1);", "gold_sql": ""},
+        ]),
+    )
+    assert res1["written"] == "querity_team/eval_cases.json"
+    res2 = dn.write_repo_file("backend/test_regression.py", "def test_new():\n    assert True\n")
+    assert res2["written"] == "backend/test_regression.py"
 
 
 def test_det_gate_catches_shrunk_eval_cases(tmp_path: Path):

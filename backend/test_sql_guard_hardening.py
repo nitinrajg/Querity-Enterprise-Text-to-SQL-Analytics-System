@@ -91,3 +91,55 @@ def test_describe_still_allowed():
     """DESCRIBE must remain valid after the EXPLAIN lockdown."""
     result = validate_sql_safety("DESCRIBE products;", allow_meta=True)
     assert result.upper().startswith("DESCRIBE")
+
+
+@pytest.mark.parametrize(
+    "dialect,sql",
+    [
+        ("postgres", "SELECT pg_read_binary_file('/etc/passwd');"),
+        ("postgres", "SELECT pg_sleep(5);"),
+        ("postgres", "SELECT set_config('log_statement', 'all', false);"),
+        ("postgres", "SELECT query_to_xml('SELECT 1', false, true, '');"),
+        ("postgres", "SELECT dblink('dbname=postgres', 'SELECT 1');"),
+        ("postgres", "SELECT pg_terminate_backend(1);"),
+        ("postgres", "SELECT current_setting('data_directory');"),
+        ("postgres", "SELECT version();"),
+        ("postgres", "SELECT pg_catalog.pg_read_binary_file('/etc/passwd');"),
+        ("duckdb", "SELECT * FROM (SELECT pg_sleep(1)) AS sub;"),
+    ],
+)
+def test_disallowed_functions_blocked_by_allowlist(dialect: str, sql: str):
+    """Any function outside ALLOWED_FUNCTIONS (including dangerous Postgres functions) must fail."""
+    with pytest.raises(SQLSafetyError):
+        validate_sql_safety(sql, dialect=dialect)
+
+
+@pytest.mark.parametrize(
+    "dialect,sql",
+    [
+        (
+            "postgres",
+            "SELECT c.name, COUNT(o.id) AS cnt, COALESCE(SUM(oi.quantity * oi.unit_price), 0) AS spend "
+            "FROM customers c LEFT JOIN orders o ON c.id = o.customer_id "
+            "LEFT JOIN order_items oi ON o.id = oi.order_id "
+            "WHERE o.status = 'delivered' AND (c.country = 'India' OR c.country = 'Canada') "
+            "GROUP BY c.name ORDER BY spend DESC",
+        ),
+        (
+            "postgres",
+            "SELECT DATE_TRUNC('month', order_date) AS m, EXTRACT(YEAR FROM order_date) AS y, "
+            "CASE WHEN COUNT(*) > 1 THEN 'multi' ELSE 'single' END AS bucket "
+            "FROM orders GROUP BY 1, 2",
+        ),
+        (
+            "duckdb",
+            "SELECT category, LOWER(name) AS lname, ROUND(AVG(price), 2) AS avg_p, "
+            "ROW_NUMBER() OVER (PARTITION BY category ORDER BY price DESC) AS rn "
+            "FROM products GROUP BY category, name, price",
+        ),
+    ],
+)
+def test_approved_analytical_functions_allowed_both_dialects(dialect: str, sql: str):
+    """Logical operators and analytical SQL functions must pass under the allowlist in both dialects."""
+    validated = validate_sql_safety(sql, dialect=dialect)
+    assert validated.endswith(";")

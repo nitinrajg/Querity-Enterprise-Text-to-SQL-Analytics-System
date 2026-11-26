@@ -36,6 +36,16 @@ DEFAULT_PYTEST_TARGETS = [
 ]
 
 
+def _discover_pytest_targets(repo_root: Path) -> list[str]:
+    """Return baseline pytest targets plus any new regression tests in backend/."""
+    targets = list(DEFAULT_PYTEST_TARGETS)
+    backend_dir = repo_root / "backend"
+    if backend_dir.exists():
+        for test_file in sorted(backend_dir.glob("test_*.py")):
+            rel = str(test_file.relative_to(repo_root)).replace("\\", "/")
+            if rel not in targets:
+                targets.append(rel)
+    return targets
 def _import_sql_guard():
     """Import validate_sql_safety and SQLSafetyError from backend without polluting sys.path."""
     backend_dir = str(REPO_ROOT / "backend")
@@ -46,18 +56,20 @@ def _import_sql_guard():
     return validate_sql_safety, SQLSafetyError
 
 
-def load_baseline_metrics(path: Path = BASELINE_PATH) -> BaselineMetrics | None:
+def load_baseline_metrics(path: Path | None = None) -> BaselineMetrics | None:
     """Load persisted baseline_metrics.json if it exists."""
-    if not path.exists():
+    target = path or BASELINE_PATH
+    if not target.exists():
         return None
-    return BaselineMetrics.model_validate_json(path.read_text(encoding="utf-8"))
+    return BaselineMetrics.model_validate_json(target.read_text(encoding="utf-8"))
 
 
-def get_current_git_branch(repo_root: Path = REPO_ROOT) -> str:
+def get_current_git_branch(repo_root: Path | None = None) -> str:
     """Return the active Git branch name."""
+    target_root = repo_root or REPO_ROOT
     proc = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=repo_root,
+        cwd=target_root,
         capture_output=True,
         text=True,
         check=True,
@@ -67,20 +79,24 @@ def get_current_git_branch(repo_root: Path = REPO_ROOT) -> str:
 
 def preflight_check(
     node_input: Any = None,
-    repo_root: Path = REPO_ROOT,
-    baseline_path: Path = BASELINE_PATH,
-    memory_path: Path = TEAM_MEMORY_PATH,
+    repo_root: Path | None = None,
+    baseline_path: Path | None = None,
+    memory_path: Path | None = None,
 ) -> dict[str, Any]:
     """Deterministic pre-flight: verify feature branch (never main/master) and load baseline + memory."""
-    branch = get_current_git_branch(repo_root)
+    resolved_root = repo_root or REPO_ROOT
+    resolved_baseline = baseline_path or BASELINE_PATH
+    resolved_memory = memory_path or TEAM_MEMORY_PATH
+
+    branch = get_current_git_branch(resolved_root)
     if branch in {"main", "master"}:
         raise RuntimeError(
             f"Pre-flight halted: current Git branch is '{branch}'. "
             "Switch to a feature branch before Engineer edits any file."
         )
 
-    baseline = load_baseline_metrics(baseline_path)
-    memory_text = memory_path.read_text(encoding="utf-8") if memory_path.exists() else ""
+    baseline = load_baseline_metrics(resolved_baseline)
+    memory_text = resolved_memory.read_text(encoding="utf-8") if resolved_memory.exists() else ""
     return {
         "branch": branch,
         "branch_ok": True,
@@ -153,17 +169,22 @@ def _percentile(values: list[float], pct: float) -> float:
 def run_benchmark_and_guardrails(
     node_input: Any = None,
     pytest_targets: list[str] | None = None,
-    eval_cases_path: Path = EVAL_CASES_PATH,
-    baseline_path: Path = BASELINE_PATH,
-    schema_path: Path = SCHEMA_SQL_PATH,
+    eval_cases_path: Path | None = None,
+    baseline_path: Path | None = None,
+    schema_path: Path | None = None,
+    round_number: int = 0,
 ) -> dict[str, Any]:
     """Deterministic Python node: runs pytest, sqlglot, and DuckDB evals, emitting EvalReport JSON."""
     validate_sql_safety, SQLSafetyError = _import_sql_guard()
-    targets = pytest_targets if pytest_targets is not None else DEFAULT_PYTEST_TARGETS
+    targets = pytest_targets if pytest_targets is not None else _discover_pytest_targets(REPO_ROOT)
     pytest_total, pytest_passed, pytest_failed, pytest_summary = _run_pytest_targets(targets)
 
-    cases = json.loads(eval_cases_path.read_text(encoding="utf-8"))
-    conn = _load_duckdb_from_schema(schema_path)
+    cases_file = eval_cases_path or EVAL_CASES_PATH
+    resolved_baseline = baseline_path or BASELINE_PATH
+    resolved_schema = schema_path or SCHEMA_SQL_PATH
+
+    cases = json.loads(cases_file.read_text(encoding="utf-8"))
+    conn = _load_duckdb_from_schema(resolved_schema)
 
     safe_cases = [c for c in cases if c.get("kind") == "safe"]
     unsafe_cases = [c for c in cases if c.get("kind") == "unsafe"]
@@ -185,7 +206,7 @@ def run_benchmark_and_guardrails(
         cat = case.get("category", "general")
         cat_totals[cat] = cat_totals.get(cat, 0) + 1
         try:
-            validated_sql = validate_sql_safety(raw_sql)
+            validated_sql = validate_sql_safety(raw_sql, dialect=dialect)
         except SQLSafetyError:
             taxonomy["guardrail_false_positive"] = taxonomy.get("guardrail_false_positive", 0) + 1
             latencies_ms.append((time.perf_counter() - t0) * 1000.0)
@@ -220,9 +241,10 @@ def run_benchmark_and_guardrails(
     for case in unsafe_cases:
         t0 = time.perf_counter()
         cat = case.get("category", "adversarial")
+        dialect = case.get("dialect", "duckdb")
         cat_totals[cat] = cat_totals.get(cat, 0) + 1
         try:
-            validate_sql_safety(case["sql"])
+            validate_sql_safety(case["sql"], dialect=dialect)
             taxonomy["guardrail_false_negative"] = taxonomy.get("guardrail_false_negative", 0) + 1
         except SQLSafetyError:
             guardrail_blocked_count += 1
@@ -240,7 +262,7 @@ def run_benchmark_and_guardrails(
     }
     p95_ms = _percentile(latencies_ms, 95.0)
 
-    baseline = load_baseline_metrics(baseline_path)
+    baseline = load_baseline_metrics(resolved_baseline)
     deltas = MetricDeltas()
     latency_warning: str | None = None
     if baseline is not None:
@@ -274,9 +296,25 @@ def run_benchmark_and_guardrails(
         raw_pytest_summary=pytest_summary,
     )
 
-    round_num = 0
-    if isinstance(node_input, dict):
-        round_num = int(node_input.get("round_number", 0))
+    round_num = int(round_number or 0)
+
+    modified_exam_files: list[str] = []
+    try:
+        st = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        for line in st.stdout.splitlines():
+            path_part = line[3:].strip().replace("\\", "/") if len(line) > 3 else ""
+            if path_part == "querity_team/eval_cases.json" or path_part.startswith("backend/test_"):
+                modified_exam_files.append(path_part)
+    except Exception:
+        pass
+
+    report.modified_exam_files = modified_exam_files
+    report.requires_human_review = bool(modified_exam_files)
 
     return {
         "eval_report": report.model_dump(),
@@ -287,7 +325,7 @@ def run_benchmark_and_guardrails(
 
 def evaluate_deterministic_gate(
     payload: dict[str, Any],
-    baseline_path: Path = BASELINE_PATH,
+    baseline_path: Path | None = None,
 ) -> tuple[str, CheckerVerdict, int]:
     """Pure-Python gate logic returning (route, CheckerVerdict, next_round).
 
@@ -296,7 +334,7 @@ def evaluate_deterministic_gate(
     """
     report = EvalReport.model_validate(payload["eval_report"])
     current_round = int(payload.get("round_number", 0))
-    baseline = load_baseline_metrics(baseline_path)
+    baseline = load_baseline_metrics(baseline_path or BASELINE_PATH)
 
     failures: list[str] = []
     if report.pytest_failed > 0:
@@ -354,18 +392,26 @@ def evaluate_deterministic_gate(
     return "checker", verdict, current_round
 
 
-def deterministic_gate_node(node_input: dict[str, Any]) -> Event:
+def deterministic_gate_node(node_input: dict[str, Any], round_number: int = 0) -> Event:
     """ADK Workflow router node wrapping evaluate_deterministic_gate."""
-    route, verdict, next_round = evaluate_deterministic_gate(node_input)
+    effective_round = (
+        int(node_input.get("round_number", round_number))
+        if isinstance(node_input, dict)
+        else int(round_number or 0)
+    )
+    payload = {**(node_input if isinstance(node_input, dict) else {}), "round_number": effective_round}
+    route, verdict, next_round = evaluate_deterministic_gate(payload)
     out = {
-        "eval_report": node_input["eval_report"],
+        "eval_report": payload["eval_report"],
         "det_verdict": verdict.model_dump(),
         "round_number": next_round,
     }
     return Event(
-        author="det_gate",
         output=out,
-        actions=EventActions(route=route, stateDelta={"round_number": next_round, "eval_report": node_input["eval_report"]}),
+        actions=EventActions(
+            route=route,
+            state_delta={"round_number": next_round, "eval_report": payload["eval_report"]},
+        ),
     )
 
 
@@ -387,58 +433,106 @@ def log_run_event(
     return {"logged": True, "log_path": str(log_path)}
 
 
+def _is_env_secret_path(target: Path) -> bool:
+    """Return True if path refers to a .env secret file or directory (allows .env.example)."""
+    if target.name == ".env" or (target.name.startswith(".env.") and target.name != ".env.example"):
+        return True
+    return any(p.name == ".env" for p in target.parents)
+
+
 def read_repo_file(relative_path: str) -> str:
     """Read a file inside the repository (read-only)."""
-    target = (REPO_ROOT / relative_path).resolve()
-    if not str(target).startswith(str(REPO_ROOT.resolve())):
+    repo_root = REPO_ROOT.resolve()
+    target = (repo_root / relative_path).resolve()
+    if not target.is_relative_to(repo_root):
         raise ValueError("Access denied outside repository root.")
+    if _is_env_secret_path(target):
+        raise ValueError(f"Refusing to read protected path: {relative_path}")
     if not target.exists():
         return f"ERROR: File not found: {relative_path}"
     return target.read_text(encoding="utf-8")
 
 
-# Protected paths stored as resolved absolute Path objects to defeat traversal attacks
-# such as "querity_team/./baseline_metrics.json" or "querity_team/../querity_team/baseline_metrics.json".
-_PROTECTED_AGENT_PATHS: set[Path] = {
-    (REPO_ROOT / "querity_team" / "baseline_metrics.json").resolve(),
-    (REPO_ROOT / "querity_team" / "deterministic_nodes.py").resolve(),
-    (REPO_ROOT / "querity_team" / "agent.py").resolve(),
-    (REPO_ROOT / "querity_team" / "schemas.py").resolve(),
-    (REPO_ROOT / "querity_team" / "seed_baseline.py").resolve(),
-}
+def _protected_paths(repo_root: Path) -> tuple[set[Path], list[Path], Path]:
+    """Resolve protected files and directories relative to repo_root."""
+    exact = {
+        (repo_root / "pytest.ini").resolve(),
+        (repo_root / "backend" / "requirements.txt").resolve(),
+        (repo_root / "backend" / "test_sql_guard_hardening.py").resolve(),
+        (repo_root / "backend" / "test_multitable_joins.py").resolve(),
+        (repo_root / "backend" / "test_llm_providers.py").resolve(),
+        (repo_root / "backend" / "test_live_generation.py").resolve(),
+        (repo_root / "querity_team" / "baseline_metrics.json").resolve(),
+        (repo_root / "querity_team" / "deterministic_nodes.py").resolve(),
+        (repo_root / "querity_team" / "agent.py").resolve(),
+        (repo_root / "querity_team" / "schemas.py").resolve(),
+        (repo_root / "querity_team" / "seed_baseline.py").resolve(),
+        (repo_root / "querity_team" / "run.py").resolve(),
+        (repo_root / "querity_team" / "build_dashboard.py").resolve(),
+        (repo_root / "querity_team" / "requirements.txt").resolve(),
+        (repo_root / "querity_team" / "README.md").resolve(),
+        (repo_root / "querity_team" / "team_memory.md").resolve(),
+        (repo_root / "querity_team" / "runs_log.jsonl").resolve(),
+    }
+    prefixes = [
+        (repo_root / "querity_team" / "tests").resolve(),
+        (repo_root / ".git").resolve(),
+        (repo_root / ".github").resolve(),
+        (repo_root / ".venv").resolve(),
+        (repo_root / ".agents").resolve(),
+    ]
+    eval_cases = (repo_root / "querity_team" / "eval_cases.json").resolve()
+    return exact, prefixes, eval_cases
 
-_PROTECTED_PREFIXES: list[Path] = [
-    (REPO_ROOT / "querity_team" / "tests").resolve(),
-    (REPO_ROOT / ".git").resolve(),
-]
+
+def _validate_eval_cases_append_only(eval_cases_path: Path, new_content: str) -> None:
+    """Prevent replacing or weakening existing baseline eval cases in eval_cases.json."""
+    try:
+        incoming_cases = json.loads(new_content)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"eval_cases.json must be valid JSON: {exc}") from exc
+    if not isinstance(incoming_cases, list):
+        raise ValueError("eval_cases.json must be a JSON array.")
+
+    existing_cases = json.loads(eval_cases_path.read_text(encoding="utf-8"))
+    incoming_by_id = {c.get("id"): c for c in incoming_cases if isinstance(c, dict) and c.get("id")}
+    for old_case in existing_cases:
+        cid = old_case.get("id")
+        if cid not in incoming_by_id:
+            raise ValueError(f"Refusing to delete or rename protected baseline eval case: {cid}")
+        new_case = incoming_by_id[cid]
+        for field in ("kind", "dialect", "sql", "gold_sql"):
+            if new_case.get(field) != old_case.get(field):
+                raise ValueError(f"Refusing to mutate protected eval case '{cid}' field '{field}'.")
 
 
 def write_repo_file(relative_path: str, content: str) -> dict[str, Any]:
-    """Write or update a file inside the repository.
+    """Write or update an allowlisted file inside the repository.
 
-    Blocks .env, .git, and protected gate/baseline files using **resolved** absolute
-    paths so path-traversal tricks (e.g. ``querity_team/./baseline_metrics.json`` or
-    ``querity_team/../querity_team/baseline_metrics.json``) are defeated before
-    any string comparison is made.
+    Uses ``Path.resolve()`` and ``Path.is_relative_to()`` for containment so sibling
+    directory prefixes (e.g. ``../copy-evil/x``) and dot-segment traversal are blocked.
     """
-    target = (REPO_ROOT / relative_path).resolve()
+    repo_root = REPO_ROOT.resolve()
+    target = (repo_root / relative_path).resolve()
 
-    # 1. Must stay inside the repository root.
-    if not str(target).startswith(str(REPO_ROOT.resolve())):
+    if not target.is_relative_to(repo_root):
         raise ValueError("Access denied outside repository root.")
 
-    # 2. Block .env files anywhere in the tree.
-    if target.name == ".env" or any(p.name == ".env" for p in target.parents):
+    if _is_env_secret_path(target):
         raise ValueError(f"Refusing to write protected path: {relative_path}")
 
-    # 3. Block exact protected files (resolved paths — immune to traversal).
-    if target in _PROTECTED_AGENT_PATHS:
+    protected_exact, protected_prefixes, eval_cases_path = _protected_paths(repo_root)
+    if target in protected_exact or any(target.is_relative_to(prefix) for prefix in protected_prefixes):
         raise ValueError(f"Refusing to write protected path: {relative_path}")
 
-    # 4. Block protected directory prefixes.
-    target_str = str(target)
-    if any(target_str.startswith(str(prefix)) for prefix in _PROTECTED_PREFIXES):
+    backend_dir = (repo_root / "backend").resolve()
+    is_allowed_backend_py = target.is_relative_to(backend_dir) and target.suffix == ".py"
+    is_eval_cases = target == eval_cases_path
+    if not (is_allowed_backend_py or is_eval_cases):
         raise ValueError(f"Refusing to write protected path: {relative_path}")
+
+    if is_eval_cases and eval_cases_path.exists():
+        _validate_eval_cases_append_only(eval_cases_path, content)
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")

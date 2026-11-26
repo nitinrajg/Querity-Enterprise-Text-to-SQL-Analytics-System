@@ -25,7 +25,7 @@ jobs:
 
       - name: Run pytest suite
         run: |
-          python -m pytest backend/test_multitable_joins.py backend/test_llm_providers.py backend/test_live_generation.py backend/test_sql_guard_hardening.py querity_team/tests/test_deterministic_nodes.py -v
+          python -m pytest -v
 
       - name: Run deterministic Runner, DetGate, and Dashboard Generator
         run: |

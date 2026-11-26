@@ -48,6 +48,8 @@ class EvalReport(BaseModel):
     baseline_deltas: MetricDeltas = Field(default_factory=MetricDeltas)
     latency_warning: str | None = None
     raw_pytest_summary: str = ""
+    requires_human_review: bool = False
+    modified_exam_files: list[str] = Field(default_factory=list)
 
 
 class CheckerVerdict(BaseModel):

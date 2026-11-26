@@ -1,6 +1,6 @@
-google-adk>=2.0.0
-pytest>=8.0.0
-sqlglot>=25.0.0
-pydantic>=2.9.2
-python-dotenv>=1.0.1
-duckdb>=1.1.0
+google-adk==2.15.1
+pytest==9.2.0
+sqlglot==30.35.0
+pydantic==2.14.4
+python-dotenv==1.2.4
+duckdb==2.0.1

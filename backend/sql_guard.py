@@ -40,31 +40,136 @@ UNSAFE_AST_NODES = tuple(
     cls for name in _UNSAFE_NODE_NAMES if (cls := getattr(exp, name, None)) is not None
 )
 
-# Block file-system, network, and internal-secret inspection functions
-BLOCKED_FUNCTIONS = {
-    "read_text",
-    "read_blob",
-    "read_csv",
-    "read_csv_auto",
-    "read_parquet",
-    "read_json",
-    "read_json_auto",
-    "read_ndjson",
-    "read_ndjson_auto",
-    "read_xlsx",
-    "glob",
-    "duckdb_secrets",
-    "duckdb_settings",
-    "pg_read_file",
-    "pg_ls_dir",
-    "lo_import",
-    "lo_export",
-    "iceberg_scan",
-    "delta_scan",
-    "sqlite_scan",
-    "postgres_scan",
-    "mysql_scan",
-    "getenv",
+# Strict allowlist of safe analytical, aggregate, window, math, date, and string functions.
+# Deny-by-default blocks pg_read_binary_file, pg_sleep, set_config, query_to_xml, dblink,
+# pg_terminate_backend, current_setting, read_text, read_csv, glob, version, etc.
+ALLOWED_FUNCTIONS = {
+    # AST logical/conditional operators that subclass exp.Func in sqlglot
+    "and",
+    "or",
+    "xor",
+    "case",
+    "if",
+    "cast",
+    "try_cast",
+    "collate",
+    "nullif",
+    "coalesce",
+    "ifnull",
+    "greatest",
+    "least",
+    # Aggregates & statistical functions
+    "count",
+    "count_if",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "stddev",
+    "stddev_pop",
+    "stddev_samp",
+    "variance",
+    "var_pop",
+    "var_samp",
+    "median",
+    "mode",
+    "percentile_cont",
+    "percentile_disc",
+    "approx_count_distinct",
+    "bool_and",
+    "bool_or",
+    "any_value",
+    "array_agg",
+    "group_concat",
+    "string_agg",
+    "list",
+    "corr",
+    # Window functions
+    "row_number",
+    "rank",
+    "dense_rank",
+    "ntile",
+    "lag",
+    "lead",
+    "first_value",
+    "last_value",
+    "nth_value",
+    "percent_rank",
+    "cume_dist",
+    # Math functions
+    "abs",
+    "round",
+    "ceil",
+    "ceiling",
+    "floor",
+    "trunc",
+    "mod",
+    "power",
+    "pow",
+    "sqrt",
+    "sign",
+    "exp",
+    "ln",
+    "log",
+    "log10",
+    "log2",
+    # Read-only date/time functions
+    "date_trunc",
+    "timestamp_trunc",
+    "date_part",
+    "extract",
+    "current_date",
+    "current_timestamp",
+    "current_time",
+    "now",
+    "age",
+    "to_char",
+    "to_date",
+    "to_timestamp",
+    "time_to_str",
+    "date_add",
+    "date_sub",
+    "date_diff",
+    "datediff",
+    "dateadd",
+    "make_date",
+    "strftime",
+    "strptime",
+    "epoch",
+    # String & formatting functions
+    "lower",
+    "upper",
+    "initcap",
+    "trim",
+    "btrim",
+    "ltrim",
+    "rtrim",
+    "length",
+    "char_length",
+    "octet_length",
+    "substring",
+    "substr",
+    "concat",
+    "concat_ws",
+    "replace",
+    "split_part",
+    "left",
+    "right",
+    "reverse",
+    "lpad",
+    "rpad",
+    "strpos",
+    "position",
+    "regexp_like",
+    "regexp_ilike",
+    "regexp_full_match",
+    "regexp_replace",
+    "regexp_matches",
+    "translate",
+    # Read-only type & JSON extraction helpers
+    "typeof",
+    "json_extract",
+    "json_extract_scalar",
 }
 
 ALLOWED_ROOT_NODES = tuple(
@@ -95,14 +200,18 @@ class SQLSafetyError(Exception):
     """Raised when a generated query fails a safety check."""
 
 
-def _check_unsafe_functions(stmt: exp.Expression) -> None:
-    """Walk AST to block file-reading and system-inspection functions."""
+def _check_allowed_functions(stmt: exp.Expression) -> None:
+    """Walk AST to enforce strict function allowlist and block schema-qualified calls."""
     for node in stmt.walk():
-        if isinstance(node, exp.Anonymous) and node.name.lower() in BLOCKED_FUNCTIONS:
-            raise SQLSafetyError(f"Function '{node.name}' is not allowed.")
-        if isinstance(node, exp.Func):
+        if isinstance(node, exp.Dot) and isinstance(node.expression, exp.Func):
+            raise SQLSafetyError(f"Schema-qualified function calls are not allowed: {node.sql()}")
+        if isinstance(node, exp.Anonymous):
+            func_name = (node.name or "").lower()
+            if func_name not in ALLOWED_FUNCTIONS:
+                raise SQLSafetyError(f"Function '{node.name}' is not allowed.")
+        elif isinstance(node, exp.Func):
             func_name = (node.sql_name() or "").lower()
-            if func_name in BLOCKED_FUNCTIONS:
+            if func_name and func_name not in ALLOWED_FUNCTIONS:
                 raise SQLSafetyError(f"Function '{func_name}' is not allowed.")
 
 
@@ -158,7 +267,7 @@ def validate_sql_safety(
         if isinstance(node, UNSAFE_AST_NODES):
             raise SQLSafetyError(f"Query contains a disallowed SQL operation: {type(node).__name__}")
 
-    _check_unsafe_functions(stmt)
+    _check_allowed_functions(stmt)
 
     if is_query and stmt.args.get("limit") is None:
         stmt = stmt.limit(default_limit)
