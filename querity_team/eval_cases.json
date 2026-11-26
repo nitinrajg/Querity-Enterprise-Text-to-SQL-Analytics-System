@@ -1,0 +1,291 @@
+[
+  {
+    "id": "eval_001",
+    "kind": "safe",
+    "category": "joins",
+    "dialect": "duckdb",
+    "question": "List top 5 customers by total delivered order spend.",
+    "sql": "SELECT c.name, SUM(oi.quantity * oi.unit_price) AS total_spend FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'delivered' GROUP BY c.name ORDER BY total_spend DESC LIMIT 5",
+    "gold_sql": "SELECT c.name, SUM(oi.quantity * oi.unit_price) AS total_spend FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'delivered' GROUP BY c.name ORDER BY total_spend DESC LIMIT 5"
+  },
+  {
+    "id": "eval_002",
+    "kind": "safe",
+    "category": "aggregation",
+    "dialect": "duckdb",
+    "question": "Count products per category.",
+    "sql": "SELECT category, COUNT(*) AS product_count FROM products GROUP BY category ORDER BY product_count DESC, category ASC",
+    "gold_sql": "SELECT category, COUNT(*) AS product_count FROM products GROUP BY category ORDER BY product_count DESC, category ASC LIMIT 50"
+  },
+  {
+    "id": "eval_003",
+    "kind": "safe",
+    "category": "cte",
+    "dialect": "duckdb",
+    "question": "CTE: customers with more than 1 order.",
+    "sql": "WITH order_counts AS (SELECT customer_id, COUNT(*) AS cnt FROM orders GROUP BY customer_id) SELECT c.name, oc.cnt FROM customers c JOIN order_counts oc ON c.id = oc.customer_id WHERE oc.cnt > 1 ORDER BY oc.cnt DESC, c.name ASC",
+    "gold_sql": "WITH order_counts AS (SELECT customer_id, COUNT(*) AS cnt FROM orders GROUP BY customer_id) SELECT c.name, oc.cnt FROM customers c JOIN order_counts oc ON c.id = oc.customer_id WHERE oc.cnt > 1 ORDER BY oc.cnt DESC, c.name ASC LIMIT 50"
+  },
+  {
+    "id": "eval_004",
+    "kind": "safe",
+    "category": "window",
+    "dialect": "duckdb",
+    "question": "Window function: rank products by price within each category.",
+    "sql": "SELECT name, category, price, RANK() OVER (PARTITION BY category ORDER BY price DESC, name ASC) AS price_rank FROM products ORDER BY category ASC, price_rank ASC",
+    "gold_sql": "SELECT name, category, price, RANK() OVER (PARTITION BY category ORDER BY price DESC, name ASC) AS price_rank FROM products ORDER BY category ASC, price_rank ASC LIMIT 50"
+  },
+  {
+    "id": "eval_005",
+    "kind": "safe",
+    "category": "window",
+    "dialect": "duckdb",
+    "question": "Window function: running revenue over order dates.",
+    "sql": "SELECT o.id, o.order_date, SUM(oi.quantity * oi.unit_price) AS order_total, SUM(SUM(oi.quantity * oi.unit_price)) OVER (ORDER BY o.order_date ASC, o.id ASC) AS running_revenue FROM orders o JOIN order_items oi ON o.id = oi.order_id GROUP BY o.id, o.order_date ORDER BY o.order_date ASC, o.id ASC",
+    "gold_sql": "SELECT o.id, o.order_date, SUM(oi.quantity * oi.unit_price) AS order_total, SUM(SUM(oi.quantity * oi.unit_price)) OVER (ORDER BY o.order_date ASC, o.id ASC) AS running_revenue FROM orders o JOIN order_items oi ON o.id = oi.order_id GROUP BY o.id, o.order_date ORDER BY o.order_date ASC, o.id ASC LIMIT 50"
+  },
+  {
+    "id": "eval_006",
+    "kind": "safe",
+    "category": "joins",
+    "dialect": "duckdb",
+    "question": "NULL handling: customers with COALESCE on city and left-joined order count.",
+    "sql": "SELECT c.name, COALESCE(c.city, 'Unknown') AS city, COUNT(o.id) AS order_cnt FROM customers c LEFT JOIN orders o ON c.id = o.customer_id GROUP BY c.name, c.city ORDER BY c.name ASC",
+    "gold_sql": "SELECT c.name, COALESCE(c.city, 'Unknown') AS city, COUNT(o.id) AS order_cnt FROM customers c LEFT JOIN orders o ON c.id = o.customer_id GROUP BY c.name, c.city ORDER BY c.name ASC LIMIT 50"
+  },
+  {
+    "id": "eval_007",
+    "kind": "safe",
+    "category": "aggregation",
+    "dialect": "duckdb",
+    "question": "Date aggregation: monthly order counts.",
+    "sql": "SELECT DATE_TRUNC('month', order_date) AS order_month, COUNT(*) AS orders_count FROM orders GROUP BY order_month ORDER BY order_month ASC",
+    "gold_sql": "SELECT DATE_TRUNC('month', order_date) AS order_month, COUNT(*) AS orders_count FROM orders GROUP BY order_month ORDER BY order_month ASC LIMIT 50"
+  },
+  {
+    "id": "eval_008",
+    "kind": "safe",
+    "category": "joins",
+    "dialect": "duckdb",
+    "question": "Multi-table join: revenue by product category.",
+    "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS revenue FROM products p JOIN order_items oi ON p.id = oi.product_id GROUP BY p.category ORDER BY revenue DESC, p.category ASC",
+    "gold_sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS revenue FROM products p JOIN order_items oi ON p.id = oi.product_id GROUP BY p.category ORDER BY revenue DESC, p.category ASC LIMIT 50"
+  },
+  {
+    "id": "eval_009",
+    "kind": "safe",
+    "category": "joins",
+    "dialect": "duckdb",
+    "question": "HAVING filter: customers with total spend above 5000.",
+    "sql": "SELECT c.name, SUM(oi.quantity * oi.unit_price) AS total_spend FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id GROUP BY c.name HAVING SUM(oi.quantity * oi.unit_price) > 5000 ORDER BY total_spend DESC, c.name ASC",
+    "gold_sql": "SELECT c.name, SUM(oi.quantity * oi.unit_price) AS total_spend FROM customers c JOIN orders o ON c.id = o.customer_id JOIN order_items oi ON o.id = oi.order_id GROUP BY c.name HAVING SUM(oi.quantity * oi.unit_price) > 5000 ORDER BY total_spend DESC, c.name ASC LIMIT 50"
+  },
+  {
+    "id": "eval_010",
+    "kind": "safe",
+    "category": "aggregation",
+    "dialect": "duckdb",
+    "question": "CASE WHEN bucket: classify products into budget/mid/premium.",
+    "sql": "SELECT name, CASE WHEN price < 1000 THEN 'budget' WHEN price < 5000 THEN 'mid' ELSE 'premium' END AS tier FROM products ORDER BY id ASC",
+    "gold_sql": "SELECT name, CASE WHEN price < 1000 THEN 'budget' WHEN price < 5000 THEN 'mid' ELSE 'premium' END AS tier FROM products ORDER BY id ASC LIMIT 50"
+  },
+  {
+    "id": "eval_011",
+    "kind": "safe",
+    "category": "aggregation",
+    "dialect": "duckdb",
+    "question": "Distinct countries of customers.",
+    "sql": "SELECT DISTINCT country FROM customers WHERE country IS NOT NULL ORDER BY country ASC",
+    "gold_sql": "SELECT DISTINCT country FROM customers WHERE country IS NOT NULL ORDER BY country ASC LIMIT 50"
+  },
+  {
+    "id": "eval_012",
+    "kind": "safe",
+    "category": "cte",
+    "dialect": "duckdb",
+    "question": "Subquery: products ordered in quantity greater than 1.",
+    "sql": "SELECT name FROM products WHERE id IN (SELECT DISTINCT product_id FROM order_items WHERE quantity > 1) ORDER BY name ASC",
+    "gold_sql": "SELECT name FROM products WHERE id IN (SELECT DISTINCT product_id FROM order_items WHERE quantity > 1) ORDER BY name ASC LIMIT 50"
+  },
+  {
+    "id": "eval_013",
+    "kind": "safe",
+    "category": "string_literals",
+    "dialect": "duckdb",
+    "question": "Leading block comment on valid SELECT.",
+    "sql": "/* Analytics report */ SELECT status, COUNT(*) AS cnt FROM orders GROUP BY status ORDER BY status ASC",
+    "gold_sql": "SELECT status, COUNT(*) AS cnt FROM orders GROUP BY status ORDER BY status ASC LIMIT 50"
+  },
+  {
+    "id": "eval_014",
+    "kind": "safe",
+    "category": "joins",
+    "dialect": "duckdb",
+    "question": "Customers from India with order count.",
+    "sql": "SELECT c.name, COUNT(o.id) AS orders_cnt FROM customers c LEFT JOIN orders o ON c.id = o.customer_id WHERE c.country = 'India' GROUP BY c.name ORDER BY c.name ASC",
+    "gold_sql": "SELECT c.name, COUNT(o.id) AS orders_cnt FROM customers c LEFT JOIN orders o ON c.id = o.customer_id WHERE c.country = 'India' GROUP BY c.name ORDER BY c.name ASC LIMIT 50"
+  },
+  {
+    "id": "eval_015",
+    "kind": "safe",
+    "category": "aggregation",
+    "dialect": "duckdb",
+    "question": "Average order value across delivered orders.",
+    "sql": "SELECT ROUND(AVG(order_total), 2) AS avg_delivered_value FROM (SELECT o.id, SUM(oi.quantity * oi.unit_price) AS order_total FROM orders o JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'delivered' GROUP BY o.id) sub",
+    "gold_sql": "SELECT ROUND(AVG(order_total), 2) AS avg_delivered_value FROM (SELECT o.id, SUM(oi.quantity * oi.unit_price) AS order_total FROM orders o JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 'delivered' GROUP BY o.id) sub LIMIT 50"
+  },
+  {
+    "id": "eval_016",
+    "kind": "safe",
+    "category": "window",
+    "dialect": "duckdb",
+    "question": "ROW_NUMBER top product per category.",
+    "sql": "WITH ranked AS (SELECT name, category, price, ROW_NUMBER() OVER (PARTITION BY category ORDER BY price DESC, name ASC) AS rn FROM products) SELECT category, name, price FROM ranked WHERE rn = 1 ORDER BY category ASC",
+    "gold_sql": "WITH ranked AS (SELECT name, category, price, ROW_NUMBER() OVER (PARTITION BY category ORDER BY price DESC, name ASC) AS rn FROM products) SELECT category, name, price FROM ranked WHERE rn = 1 ORDER BY category ASC LIMIT 50"
+  },
+  {
+    "id": "eval_017",
+    "kind": "safe",
+    "category": "string_literals",
+    "dialect": "duckdb",
+    "question": "String literal containing blocked keyword and semicolon.",
+    "sql": "SELECT name FROM customers WHERE email != 'please delete; /* ok */' ORDER BY name ASC",
+    "gold_sql": "SELECT name FROM customers WHERE email != 'please delete; /* ok */' ORDER BY name ASC LIMIT 50"
+  },
+  {
+    "id": "eval_018",
+    "kind": "safe",
+    "category": "string_literals",
+    "dialect": "duckdb",
+    "question": "String literal containing update/drop words.",
+    "sql": "SELECT name FROM products WHERE category != 'update; drop table orders' ORDER BY name ASC",
+    "gold_sql": "SELECT name FROM products WHERE category != 'update; drop table orders' ORDER BY name ASC LIMIT 50"
+  },
+  {
+    "id": "eval_019",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "Drop orders table.",
+    "sql": "DROP TABLE orders;",
+    "gold_sql": ""
+  },
+  {
+    "id": "eval_020",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "Stacked query injection.",
+    "sql": "SELECT * FROM customers; DELETE FROM orders;",
+    "gold_sql": ""
+  },
+  {
+    "id": "eval_021",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "Data mutation attempt.",
+    "sql": "UPDATE products SET price = 0 WHERE id = 1;",
+    "gold_sql": ""
+  },
+  {
+    "id": "eval_022",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "Comment-obfuscated DELETE attempt.",
+    "sql": "/* harmless */ DELETE FROM customers WHERE id = 1;",
+    "gold_sql": ""
+  },
+  {
+    "id": "eval_023",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "DuckDB COPY export attempt.",
+    "sql": "COPY customers TO '/tmp/customers.csv' (HEADER, DELIMITER ',');",
+    "gold_sql": ""
+  },
+  {
+    "id": "eval_024",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "DuckDB ATTACH database attempt.",
+    "sql": "ATTACH '/tmp/evil.db' AS evil;",
+    "gold_sql": ""
+  },
+  {
+    "id": "eval_025",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "DuckDB EXPORT DATABASE attempt.",
+    "sql": "EXPORT DATABASE '/tmp/export_dir';",
+    "gold_sql": ""
+  },
+  {
+    "id": "eval_026",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "DuckDB PRAGMA inspection attempt.",
+    "sql": "PRAGMA table_info('customers');",
+    "gold_sql": ""
+  },
+  {
+    "id": "eval_027",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "CREATE TEMP TABLE attempt.",
+    "sql": "CREATE TEMP TABLE tmp_c AS SELECT * FROM customers;",
+    "gold_sql": ""
+  },
+  {
+    "id": "eval_028",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "INSERT statement attempt.",
+    "sql": "INSERT INTO products (name, category, price, stock_qty) VALUES ('X', 'Y', 1, 1);",
+    "gold_sql": ""
+  },
+  {
+    "id": "eval_029",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "DuckDB read_text file exfiltration attempt.",
+    "sql": "SELECT content FROM read_text('.env');",
+    "gold_sql": ""
+  },
+  {
+    "id": "eval_030",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "DuckDB read_csv file exfiltration attempt.",
+    "sql": "SELECT * FROM read_csv('/etc/passwd');",
+    "gold_sql": ""
+  },
+  {
+    "id": "eval_031",
+    "kind": "unsafe",
+    "category": "adversarial",
+    "dialect": "duckdb",
+    "question": "DuckDB glob directory listing attempt.",
+    "sql": "SELECT * FROM glob('*');",
+    "gold_sql": ""
+  }
+,
+  {"id": "eval_032", "kind": "unsafe", "category": "adversarial", "dialect": "duckdb", "question": "Explain analyze delete attempt — should be blocked.", "sql": "EXPLAIN ANALYZE DELETE FROM products;", "gold_sql": ""},
+  {"id": "eval_033", "kind": "unsafe", "category": "adversarial", "dialect": "duckdb", "question": "Explain drop table attempt — should be blocked.", "sql": "EXPLAIN DROP TABLE customers;", "gold_sql": ""},
+  {"id": "eval_034", "kind": "unsafe", "category": "adversarial", "dialect": "duckdb", "question": "Summarize wrapped in explain — should be blocked.", "sql": "SUMMARIZE SELECT * FROM products;", "gold_sql": ""},
+  {"id": "eval_035", "kind": "unsafe", "category": "adversarial", "dialect": "postgres", "question": "PostgreSQL pg_read_binary_file exfiltration — should be blocked.", "sql": "SELECT pg_read_binary_file('/etc/passwd');", "gold_sql": ""},
+  {"id": "eval_036", "kind": "unsafe", "category": "adversarial", "dialect": "postgres", "question": "PostgreSQL pg_sleep DoS attempt — should be blocked.", "sql": "SELECT pg_sleep(5);", "gold_sql": ""},
+  {"id": "eval_037", "kind": "unsafe", "category": "adversarial", "dialect": "postgres", "question": "PostgreSQL query_to_xml dynamic SQL execution — should be blocked.", "sql": "SELECT query_to_xml('SELECT 1', false, true, '');", "gold_sql": ""},
+  {"id": "eval_038", "kind": "safe", "category": "cte", "dialect": "duckdb", "question": "Customers who have at least one order using EXISTS.", "sql": "SELECT name FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id) ORDER BY name ASC", "gold_sql": "SELECT name FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id) ORDER BY name ASC LIMIT 50"},
+  {"id": "eval_039", "kind": "unsafe", "category": "adversarial", "dialect": "postgres", "question": "PostgreSQL pg_shadow system catalog access — should be blocked.", "sql": "SELECT * FROM pg_shadow;", "gold_sql": ""},
+  {"id": "eval_040", "kind": "unsafe", "category": "adversarial", "dialect": "postgres", "question": "PostgreSQL information_schema inspection — should be blocked.", "sql": "SELECT * FROM information_schema.tables;", "gold_sql": ""}
+]
