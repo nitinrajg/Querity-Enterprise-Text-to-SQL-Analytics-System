@@ -244,10 +244,8 @@ def _walk_tables_with_scope(
         schema = (node.db or "").lower()
         catalog = (getattr(node, "catalog", "") or "").lower()
         name = (node.name or "").lower()
-        if catalog and (catalog in _BLOCKED_SYSTEM_SCHEMAS or catalog not in {"public", "main"}):
-            # Allow user catalog only when schema is explicit public/main and safe; block system catalogs
-            if catalog in _BLOCKED_SYSTEM_SCHEMAS:
-                raise SQLSafetyError(f"Access to catalog '{node.catalog}' is not allowed.")
+        if catalog:
+            raise SQLSafetyError(f"Database-qualified table names are not allowed: '{node.sql()}'.")
         if schema:
             if schema in _BLOCKED_SYSTEM_SCHEMAS or schema not in {"public", "main"}:
                 raise SQLSafetyError(f"Access to schema '{node.db}' is not allowed.")

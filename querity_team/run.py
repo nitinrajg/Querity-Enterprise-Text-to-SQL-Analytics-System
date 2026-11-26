@@ -10,7 +10,7 @@ from google.adk.runners import InMemoryRunner
 from google.genai import types
 
 from .agent import root_agent
-from .deterministic_nodes import get_git_diff
+from .deterministic_nodes import get_full_review_diff
 
 load_dotenv()
 
@@ -25,14 +25,18 @@ def _is_daily_quota_error(exc: BaseException) -> bool:
 
 
 def _prompt_cli_confirmation(func_call: types.FunctionCall) -> dict[str, object]:
-    """Display workspace diff and prompt interactively before approving tool/code execution."""
+    """Display full staged/unstaged diff and complete new files before approving execution."""
     print("\n================ [HITL APPROVAL REQUIRED] ================")
     args = dict(func_call.args or {})
     print(args.get("message") or f"Approval requested for: {func_call.name}")
-    diff_preview = get_git_diff()
-    if diff_preview.strip():
-        print("\n--- Current Workspace Diff ---")
-        print(diff_preview[:4000])
+    full_review, inspectable = get_full_review_diff()
+    if not inspectable:
+        print("\n[APPROVAL BLOCKED] Full changes could not be inspected:")
+        print(full_review)
+        return {"confirmed": False}
+    if full_review.strip():
+        print("\n--- Full Workspace Changes ---")
+        print(full_review)
     ans = input("\nApprove execution and resume session? [y/N]: ").strip().lower()
     return {"confirmed": ans in {"y", "yes"}}
 

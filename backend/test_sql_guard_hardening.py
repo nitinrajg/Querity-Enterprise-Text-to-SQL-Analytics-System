@@ -214,7 +214,7 @@ def test_system_catalogs_and_unbounded_series_blocked(dialect: str, sql: str):
 
 
 def test_allowed_tables_parameter_restricts_tables():
-    """Optional allowed_tables parameter blocks unapproved tables while allowing CTEs over approved tables."""
+    """Optional allowed_tables parameter blocks unapproved tables and all database-qualified names."""
     ok = validate_sql_safety(
         "WITH c AS (SELECT id FROM orders) SELECT * FROM c",
         dialect="postgres",
@@ -223,3 +223,11 @@ def test_allowed_tables_parameter_restricts_tables():
     assert ok.endswith(";")
     with pytest.raises(SQLSafetyError):
         validate_sql_safety("SELECT * FROM customers", dialect="postgres", allowed_tables={"orders"})
+    with pytest.raises(SQLSafetyError, match="Database-qualified"):
+        validate_sql_safety(
+            "SELECT * FROM otherdb.public.customers",
+            dialect="postgres",
+            allowed_tables={"customers"},
+        )
+    with pytest.raises(SQLSafetyError, match="Database-qualified"):
+        validate_sql_safety("SELECT * FROM mydb.public.orders", dialect="postgres")

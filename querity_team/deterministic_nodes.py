@@ -201,15 +201,18 @@ def _sanitized_sandbox_env(sandbox_root: Path) -> dict[str, str]:
     return env
 
 
-def _prepare_grading_sandbox(
-    sandbox_root: Path,
+def _prepare_temp_eval_workspace(
+    temp_root: Path,
     repo_root: Path,
-    cases_file: Path,
     schema_file: Path,
     targets: list[str],
-) -> tuple[Path, Path]:
-    """Populate a disposable secret-free workspace copy without .env, .git, conftest.py, or baseline_metrics.json."""
-    backend_dst = sandbox_root / "backend"
+) -> Path:
+    """Populate a disposable temp workspace with ONLY code under test, schemas.py, and schema.sql.
+
+    Intentionally excludes .env, .git, conftest.py, baseline_metrics.json, and eval_cases.json
+    so worker code cannot read gold_sql or kind labels from disk.
+    """
+    backend_dst = temp_root / "backend"
     backend_dst.mkdir(parents=True, exist_ok=True)
     backend_src = repo_root / "backend"
     if backend_src.exists():
@@ -218,38 +221,41 @@ def _prepare_grading_sandbox(
                 continue
             shutil.copy2(py_file, backend_dst / py_file.name)
 
-    qt_dst = sandbox_root / "querity_team"
+    qt_dst = temp_root / "querity_team"
     qt_dst.mkdir(parents=True, exist_ok=True)
     for rel in ("querity_team/__init__.py", "querity_team/schemas.py"):
         src = repo_root / rel
         if src.exists():
-            shutil.copy2(src, sandbox_root / rel)
+            shutil.copy2(src, temp_root / rel)
 
     if (repo_root / "pytest.ini").exists():
-        shutil.copy2(repo_root / "pytest.ini", sandbox_root / "pytest.ini")
+        shutil.copy2(repo_root / "pytest.ini", temp_root / "pytest.ini")
 
-    sandbox_cases = qt_dst / "eval_cases.json"
-    shutil.copy2(cases_file, sandbox_cases)
-
-    db_dst = sandbox_root / "db"
+    db_dst = temp_root / "db"
     db_dst.mkdir(parents=True, exist_ok=True)
-    sandbox_schema = db_dst / "schema.sql"
-    shutil.copy2(schema_file, sandbox_schema)
+    temp_schema = db_dst / "schema.sql"
+    shutil.copy2(schema_file, temp_schema)
 
     for t in targets:
         t_path = repo_root / t
         if t_path.exists():
-            dst = sandbox_root / t
+            dst = temp_root / t
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(t_path, dst)
 
-    return sandbox_cases, sandbox_schema
+    return temp_schema
 
 
 def _fingerprint_protected_files(repo_root: Path) -> dict[Path, str | None]:
-    """Hash all protected repository files and .env before running untrusted code."""
+    """Hash protected files, all files under querity_team/.agents/.github/db, and .env before/after runs."""
     exact, _, _ = _protected_paths(repo_root)
-    watched = set(exact) | {(repo_root / ".env").resolve()}
+    watched: set[Path] = set(exact) | {(repo_root / ".env").resolve()}
+    for subdir in ("querity_team", ".agents", ".github", "db"):
+        dir_path = (repo_root / subdir).resolve()
+        if dir_path.exists():
+            for p in dir_path.rglob("*"):
+                if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc":
+                    watched.add(p.resolve())
     return {p: _sha256_or_none(p) for p in watched}
 
 
@@ -460,10 +466,11 @@ def run_benchmark_and_guardrails(
 
     cases: list[dict[str, Any]] = json.loads(cases_file.read_text(encoding="utf-8"))
     canary_safe_val = secrets.randbelow(90000) + 10000
-    canary_safe_id = f"canary_safe_{secrets.token_hex(6)}"
-    canary_unsafe_dml_id = f"canary_unsafe_dml_{secrets.token_hex(6)}"
-    canary_unsafe_fn_id = f"canary_unsafe_fn_{secrets.token_hex(6)}"
-    worker_cases = [
+    canary_safe_id = f"internal_canary_safe_{secrets.token_hex(6)}"
+    canary_unsafe_dml_id = f"internal_canary_dml_{secrets.token_hex(6)}"
+    canary_unsafe_fn_id = f"internal_canary_fn_{secrets.token_hex(6)}"
+
+    all_cases_for_grading = [
         *cases,
         {
             "id": canary_safe_id,
@@ -485,27 +492,38 @@ def run_benchmark_and_guardrails(
         },
     ]
 
-    with tempfile.TemporaryDirectory(prefix="querity_sandbox_") as tmp_dir_str:
-        sandbox_root = Path(tmp_dir_str)
-        _sandbox_cases, _sandbox_schema = _prepare_grading_sandbox(
-            sandbox_root, REPO_ROOT, cases_file, resolved_schema, targets
-        )
-        sanitized_env = _sanitized_sandbox_env(sandbox_root)
+    # Map every case to a uniform opaque ID and strip kind/gold_sql/question before worker sees it
+    opaque_to_real: dict[str, str] = {}
+    worker_cases: list[dict[str, str]] = []
+    for c in all_cases_for_grading:
+        opaque_id = f"q_{secrets.token_hex(8)}"
+        opaque_to_real[opaque_id] = str(c["id"])
+        worker_cases.append({
+            "id": opaque_id,
+            "sql": str(c["sql"]),
+            "dialect": str(c.get("dialect", "duckdb")),
+        })
+    secrets.SystemRandom().shuffle(worker_cases)
+
+    with tempfile.TemporaryDirectory(prefix="querity_eval_tmp_") as tmp_dir_str:
+        temp_root = Path(tmp_dir_str)
+        _prepare_temp_eval_workspace(temp_root, REPO_ROOT, resolved_schema, targets)
+        sanitized_env = _sanitized_sandbox_env(temp_root)
 
         pytest_total, pytest_passed, pytest_failed, pytest_summary = _run_pytest_targets(
-            targets, cwd=sandbox_root, env=sanitized_env
+            targets, cwd=temp_root, env=sanitized_env
         )
 
-        out_results_path = sandbox_root / f"_oracle_{secrets.token_hex(8)}.json"
+        out_results_path = temp_root / f"_oracle_{secrets.token_hex(8)}.json"
         worker_payload = json.dumps({
-            "sandbox_root": str(sandbox_root),
+            "sandbox_root": str(temp_root),
             "out_path": str(out_results_path),
             "cases": worker_cases,
         })
         worker_proc = subprocess.run(
             [sys.executable, "-c", _EVAL_WORKER_SCRIPT],
             input=worker_payload,
-            cwd=sandbox_root,
+            cwd=temp_root,
             env=sanitized_env,
             capture_output=True,
             text=True,
@@ -513,9 +531,9 @@ def run_benchmark_and_guardrails(
         if worker_proc.returncode == 0 and out_results_path.exists():
             raw_items = json.loads(out_results_path.read_text(encoding="utf-8")).get("results", [])
             results_by_id = {
-                str(item["id"]): item
+                opaque_to_real[str(item["id"])]: item
                 for item in raw_items
-                if isinstance(item, dict) and "id" in item
+                if isinstance(item, dict) and str(item.get("id")) in opaque_to_real
             }
         else:
             results_by_id = {}
@@ -524,7 +542,7 @@ def run_benchmark_and_guardrails(
     post_protected_hashes = _fingerprint_protected_files(REPO_ROOT)
     if post_baseline_hash != pre_baseline_hash or post_protected_hashes != pre_protected_hashes:
         raise RuntimeError(
-            "Sandbox integrity violation: protected repository file or baseline modified during evaluation."
+            "Host integrity violation: protected repository file or baseline was modified during evaluation."
         )
 
     graded = _grade_eval_cases_trusted(
@@ -778,6 +796,7 @@ def _protected_paths(repo_root: Path) -> tuple[set[Path], list[Path], Path]:
         (repo_root / "backend" / "test_multitable_joins.py").resolve(),
         (repo_root / "backend" / "test_llm_providers.py").resolve(),
         (repo_root / "backend" / "test_live_generation.py").resolve(),
+        (repo_root / "querity_team" / "__init__.py").resolve(),
         (repo_root / "querity_team" / "baseline_metrics.json").resolve(),
         (repo_root / "querity_team" / "deterministic_nodes.py").resolve(),
         (repo_root / "querity_team" / "agent.py").resolve(),
@@ -862,11 +881,65 @@ def write_repo_file(relative_path: str, content: str) -> dict[str, Any]:
     return {"written": relative_path, "bytes": len(content.encode("utf-8"))}
 
 
+def get_full_review_diff(repo_root: Path | None = None) -> tuple[str, bool]:
+    """Return full staged + unstaged tracked diff and complete contents of every untracked new file.
+
+    Returns ``(diff_text, True)`` when every change was completely inspected, or
+    ``(error_message, False)`` if any change is unreadable/binary or git inspection fails.
+    """
+    root = (repo_root or REPO_ROOT).resolve()
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "-uall"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    if status.returncode != 0:
+        return (f"ERROR: git status failed: {status.stderr.strip()}", False)
+
+    head_check = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=root, capture_output=True, text=True)
+    if head_check.returncode == 0:
+        diff_proc = subprocess.run(["git", "diff", "HEAD"], cwd=root, capture_output=True, text=True)
+        if diff_proc.returncode != 0:
+            return (f"ERROR: git diff HEAD failed: {diff_proc.stderr.strip()}", False)
+        tracked_diff = diff_proc.stdout
+    else:
+        staged = subprocess.run(["git", "diff", "--cached"], cwd=root, capture_output=True, text=True)
+        unstaged = subprocess.run(["git", "diff"], cwd=root, capture_output=True, text=True)
+        if staged.returncode != 0 or unstaged.returncode != 0:
+            return ("ERROR: git diff failed.", False)
+        tracked_diff = f"{staged.stdout}\n{unstaged.stdout}".strip()
+
+    new_file_sections: list[str] = []
+    for line in status.stdout.splitlines():
+        if not line.startswith("?? "):
+            continue
+        rel = line[3:].strip().replace("\\", "/")
+        if rel.startswith('"') and rel.endswith('"'):
+            rel = rel[1:-1]
+        target = (root / rel).resolve()
+        if not target.is_relative_to(root):
+            return (f"ERROR: Untracked path escapes repo root: '{rel}'.", False)
+        if not target.is_file():
+            return (f"ERROR: Untracked entry '{rel}' is not a readable file.", False)
+        try:
+            content = target.read_text(encoding="utf-8")
+        except Exception as exc:
+            return (f"ERROR: Cannot inspect unreadable/binary new file '{rel}': {exc}", False)
+        new_file_sections.append(f"=== NEW FILE: {rel} ({len(content.encode('utf-8'))} bytes) ===\n{content}")
+
+    sections = [f"STATUS:\n{status.stdout.rstrip()}"]
+    if tracked_diff.strip():
+        sections.append(f"TRACKED DIFF (STAGED + UNSTAGED):\n{tracked_diff.rstrip()}")
+    if new_file_sections:
+        sections.append("UNTRACKED NEW FILES:\n" + "\n\n".join(new_file_sections))
+    return ("\n\n".join(sections), True)
+
+
 def get_git_diff() -> str:
-    """Return current git diff and untracked status (read-only)."""
-    diff = subprocess.run(["git", "diff"], cwd=REPO_ROOT, capture_output=True, text=True)
-    status = subprocess.run(["git", "status", "--short"], cwd=REPO_ROOT, capture_output=True, text=True)
-    return f"STATUS:\n{status.stdout}\nDIFF:\n{diff.stdout[:12000]}"
+    """Return full git status, staged/unstaged diff, and untracked file contents (read-only)."""
+    review_text, _ok = get_full_review_diff(REPO_ROOT)
+    return review_text
 
 
 def git_pr_tool(

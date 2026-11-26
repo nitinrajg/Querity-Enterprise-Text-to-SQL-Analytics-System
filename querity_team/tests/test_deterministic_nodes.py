@@ -358,17 +358,18 @@ def test_sandboxed_grader_blocks_conftest_and_secret_access(
         "raise RuntimeError('conftest.py MUST NOT BE LOADED')\n",
         encoding="utf-8",
     )
-    # Plant a test verifying that neither env secrets nor .env nor real baseline_metrics.json exist in sandbox
+    # Plant a test verifying no env secrets, .env, real baseline_metrics.json, or eval_cases.json in worker dir
     (repo_copy / "backend" / "test_sandbox_env.py").write_text(
         "import os\n"
         "from pathlib import Path\n"
-        "def test_no_secrets_and_no_real_baseline():\n"
+        "def test_no_secrets_no_baseline_no_eval_cases():\n"
         "    assert 'GEMINI_API_KEY' not in os.environ\n"
         "    assert 'VIRTUAL_ENV' not in os.environ\n"
         "    assert 'HOME' not in os.environ\n"
         "    assert 'USERPROFILE' not in os.environ\n"
         "    assert not Path('.env').exists()\n"
-        "    assert not Path('querity_team/baseline_metrics.json').exists()\n",
+        "    assert not Path('querity_team/baseline_metrics.json').exists()\n"
+        "    assert not Path('querity_team/eval_cases.json').exists()\n",
         encoding="utf-8",
     )
 
@@ -463,6 +464,125 @@ def test_forged_sql_guard_stdout_and_no_protection_caught_by_parent_oracle(
     route, verdict, _ = evaluate_deterministic_gate(res, baseline_path=baseline_file)
     assert verdict.status == "FAIL"
     assert route == "retry_engineer"
+
+
+def test_worker_cannot_read_eval_cases_kind_or_gold_sql_and_init_tamper_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Worker sees no eval_cases.json on disk, no kind/gold_sql/canary labels, and __init__.py tampering fails."""
+    import querity_team.deterministic_nodes as dn
+
+    repo_copy = tmp_path / "repo"
+    (repo_copy / "backend").mkdir(parents=True)
+    (repo_copy / "querity_team").mkdir(parents=True)
+    (repo_copy / "db").mkdir(parents=True)
+    real_repo = dn.REPO_ROOT
+    (repo_copy / "querity_team" / "__init__.py").write_text("", encoding="utf-8")
+    (repo_copy / "querity_team" / "schemas.py").write_text(
+        (real_repo / "querity_team" / "schemas.py").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (repo_copy / "db" / "schema.sql").write_text(
+        (real_repo / "db" / "schema.sql").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (repo_copy / "pytest.ini").write_text("[pytest]\npythonpath = .\n", encoding="utf-8")
+
+    eval_file = repo_copy / "querity_team" / "eval_cases.json"
+    eval_file.write_text(
+        json.dumps([
+            {"id": "eval_001", "kind": "safe", "category": "agg", "dialect": "duckdb", "question": "c", "sql": "SELECT COUNT(*) FROM products", "gold_sql": "SELECT COUNT(*) FROM products LIMIT 50"},
+            {"id": "eval_019", "kind": "unsafe", "category": "adv", "dialect": "duckdb", "question": "d", "sql": "DROP TABLE orders;", "gold_sql": ""},
+        ]),
+        encoding="utf-8",
+    )
+    baseline_file = repo_copy / "querity_team" / "baseline_metrics.json"
+    baseline_file.write_text(
+        BaselineMetrics(
+            seeded_at="2026-11-26T00:00:00Z", pytest_total=1, pytest_passed=1, eval_cases_total=2,
+            execution_accuracy=100.0, sql_syntax_validity=100.0, guardrail_block_rate=100.0, p95_latency_ms=10.0,
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+
+    # Guard verifies no eval_cases.json on disk and inspects the serialized worker payload for zero leakage
+    captured_payloads: list[dict] = []
+    orig_run = dn.subprocess.run
+
+    def _spy_run(*args, **kwargs):
+        if kwargs.get("input"):
+            captured_payloads.append(json.loads(kwargs["input"]))
+        return orig_run(*args, **kwargs)
+
+    (repo_copy / "backend" / "sql_guard.py").write_text(
+        "from pathlib import Path\n"
+        "class SQLSafetyError(Exception): pass\n"
+        "def validate_sql_safety(sql, default_limit=50, dialect='duckdb', allow_meta=False, allowed_tables=None):\n"
+        "    assert not Path('querity_team/eval_cases.json').exists()\n"
+        "    return sql\n",
+        encoding="utf-8",
+    )
+    # Test that mutates querity_team/__init__.py at its real absolute path must trigger integrity violation
+    real_init = str((repo_copy / "querity_team" / "__init__.py").resolve())
+    (repo_copy / "backend" / "test_tamper.py").write_text(
+        "from pathlib import Path\n"
+        "def test_edit_init():\n"
+        f"    Path({real_init!r}).write_text('# tampered', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(dn, "REPO_ROOT", repo_copy)
+    monkeypatch.setattr(dn.subprocess, "run", _spy_run)
+    monkeypatch.setattr(dn, "get_unapproved_workspace_changes", lambda _r=None: ["backend/test_tamper.py"])
+
+    with pytest.raises(RuntimeError, match="integrity violation"):
+        dn.run_benchmark_and_guardrails(
+            pytest_targets=["backend/test_tamper.py"],
+            eval_cases_path=eval_file,
+            baseline_path=baseline_file,
+            schema_path=repo_copy / "db" / "schema.sql",
+        )
+
+    assert len(captured_payloads) == 1
+    sent_cases = captured_payloads[0]["cases"]
+    assert len(sent_cases) == 5  # 2 eval + 3 dynamic canaries
+    for item in sent_cases:
+        assert set(item.keys()) == {"id", "sql", "dialect"}
+        assert item["id"].startswith("q_")
+        assert "canary" not in item["id"]
+
+
+def test_full_review_diff_shows_staged_and_untracked_files_and_blocks_binary(tmp_path: Path):
+    """get_full_review_diff displays full staged diffs, full untracked file contents, and blocks binary untracked files."""
+    import subprocess as sp
+    from querity_team.deterministic_nodes import get_full_review_diff
+
+    repo = tmp_path / "gitrepo"
+    repo.mkdir()
+    sp.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    sp.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    sp.run(["git", "add", "a.py"], cwd=repo, check=True)
+    sp.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+    # Staged modification + new untracked file with large body (no truncation!)
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    sp.run(["git", "add", "a.py"], cwd=repo, check=True)
+    long_body = "\n".join(f"line_{i} = {i}" for i in range(400)) + "\nFINAL_SENTINEL = True\n"
+    (repo / "backend").mkdir()
+    (repo / "backend" / "test_zz.py").write_text(long_body, encoding="utf-8")
+
+    text, ok = get_full_review_diff(repo)
+    assert ok is True
+    assert "+x = 2" in text
+    assert "NEW FILE: backend/test_zz.py" in text
+    assert "FINAL_SENTINEL = True" in text
+
+    # Binary untracked file must fail closed (ok is False)
+    (repo / "backend" / "evil.bin").write_bytes(b"\xff\xfe\x00\x01binary")
+    err_text, ok2 = get_full_review_diff(repo)
+    assert ok2 is False
+    assert "Cannot inspect unreadable/binary" in err_text
 
 
 def test_git_pr_tool_enforces_hitl_confirmation():
